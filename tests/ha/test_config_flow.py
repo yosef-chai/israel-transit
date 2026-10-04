@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -266,7 +267,10 @@ async def test_reconfigure_can_clear_the_train_destination(
     assert (updated.unique_id, updated.title) == (subentry.unique_id, subentry.title)
     after = stop_device(hass, "21023")
     assert after is not None and after.id == device.id
-    assert subentry.subentry_id in after.config_entries_subentries[entry.entry_id]
+    # Through the entities: newer releases deprecate the device's subentry map.
+    entities = er.async_entries_for_device(er.async_get(hass), after.id)
+    assert entities
+    assert {e.config_subentry_id for e in entities} == {subentry.subentry_id}
 
 
 # --- the very first run -----------------------------------------------------
