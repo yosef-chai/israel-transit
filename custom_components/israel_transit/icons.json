@@ -1,0 +1,51 @@
+{
+  "entity": {
+    "sensor": {
+      "next_arrival": {
+        "default": "mdi:bus-clock"
+      },
+      "next_arrival_in": {
+        "default": "mdi:timer-outline"
+      },
+      "arrivals": {
+        "default": "mdi:format-list-numbered"
+      },
+      "line_next_arrival": {
+        "default": "mdi:bus-clock"
+      },
+      "line_next_arrival_in": {
+        "default": "mdi:timer-outline"
+      }
+    }
+  },
+  "services": {
+    "get_arrivals": {
+      "service": "mdi:bus-marker"
+    },
+    "refresh_stop": {
+      "service": "mdi:refresh"
+    },
+    "search_stops": {
+      "service": "mdi:magnify"
+    },
+    "rebuild_timetable": {
+      "service": "mdi:database-refresh"
+    }
+  },
+  "triggers": {
+    "arrival": {
+      "trigger": "mdi:bus-clock"
+    },
+    "delay": {
+      "trigger": "mdi:clock-alert-outline"
+    }
+  },
+  "conditions": {
+    "is_arriving_within": {
+      "condition": "mdi:bus-clock"
+    },
+    "is_realtime_available": {
+      "condition": "mdi:access-point"
+    }
+  }
+}

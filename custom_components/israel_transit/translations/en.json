@@ -1,0 +1,270 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "Sets up Israel Transit and builds a local copy of the Ministry of Transport timetable, which downloads about 90 MB once. You then add your stops one by one."
+      }
+    },
+    "abort": {
+      "already_configured": "Israel Transit is already set up. Add stops with the \"Add stop\" button on its page."
+    }
+  },
+  "config_subentries": {
+    "stop": {
+      "initiate_flow": {
+        "user": "Add stop",
+        "reconfigure": "Reconfigure stop"
+      },
+      "entry_type": "Stop",
+      "step": {
+        "user": {
+          "title": "Find a stop",
+          "description": "Search by stop name, city and street, or by the code printed on the stop sign. Words combine, so \"Kfar Saba Weizmann\" narrows to that street.",
+          "data": {
+            "query": "Search"
+          }
+        },
+        "pick_stop": {
+          "title": "Choose a stop",
+          "data": {
+            "stop_code": "Stop"
+          }
+        },
+        "settings": {
+          "title": "Stop settings",
+          "description": "{stop}\n\nChoose which lines get their own sensors. Leave empty to track the stop as a whole.",
+          "data": {
+            "lines": "Tracked lines",
+            "scan_interval": "Update interval",
+            "rail_destination": "Train destination"
+          },
+          "data_description": {
+            "scan_interval": "How often to refresh. Real-time data comes from a free community service, so please keep this at 60 seconds or more.",
+            "rail_destination": "Only for railway stations. Israel Railways reports departure delays per route, so a destination is needed to show live train times instead of the timetable."
+          }
+        },
+        "reconfigure": {
+          "title": "Stop settings",
+          "description": "{stop}\n\nChoose which lines get their own sensors. Leave empty to track the stop as a whole.",
+          "data": {
+            "lines": "Tracked lines",
+            "scan_interval": "Update interval",
+            "rail_destination": "Train destination"
+          },
+          "data_description": {
+            "scan_interval": "How often to refresh. Real-time data comes from a free community service, so please keep this at 60 seconds or more.",
+            "rail_destination": "Only for railway stations. Israel Railways reports departure delays per route, so a destination is needed to show live train times instead of the timetable."
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Could not read the local timetable index.",
+        "no_stops_found": "No stop matched that search."
+      },
+      "abort": {
+        "already_configured": "This stop is already set up.",
+        "reconfigure_successful": "The stop was updated.",
+        "index_unavailable": "The timetable index could not be built, so there are no stops to search: {error}"
+      },
+      "progress": {
+        "building_index": "Building the local timetable from the Ministry of Transport feed. This downloads about 90 MB and runs once."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "next_arrival": {
+        "name": "Next arrival",
+        "state_attributes": {
+          "is_realtime": {
+            "name": "Real-time"
+          },
+          "line": {
+            "name": "Line"
+          },
+          "destination": {
+            "name": "Destination"
+          },
+          "operator": {
+            "name": "Operator"
+          },
+          "platform": {
+            "name": "Platform"
+          },
+          "delay_minutes": {
+            "name": "Delay"
+          }
+        }
+      },
+      "next_arrival_in": {
+        "name": "Next arrival in"
+      },
+      "arrivals": {
+        "name": "Upcoming arrivals"
+      },
+      "line_next_arrival": {
+        "name": "Line {line} next arrival"
+      },
+      "line_next_arrival_in": {
+        "name": "Line {line} next arrival in"
+      }
+    }
+  },
+  "services": {
+    "get_arrivals": {
+      "name": "Get arrivals",
+      "description": "Returns the upcoming arrivals at a stop, for use in scripts, templates and automations.",
+      "fields": {
+        "stop_code": {
+          "name": "Stop code",
+          "description": "The Ministry of Transport stop code printed on the stop sign."
+        },
+        "lines": {
+          "name": "Lines",
+          "description": "Only return these line numbers. Leave empty for all lines."
+        },
+        "rail_destination": {
+          "name": "Train destination",
+          "description": "Israel Railways destination station ID, for live train departures."
+        }
+      }
+    },
+    "refresh_stop": {
+      "name": "Refresh stop",
+      "description": "Fetches a stop's arrivals now instead of waiting for its next update."
+    },
+    "search_stops": {
+      "name": "Search stops",
+      "description": "Searches the Ministry of Transport stops by name, city, street or code.",
+      "fields": {
+        "query": {
+          "name": "Search",
+          "description": "Words to search for, or a stop code."
+        },
+        "limit": {
+          "name": "Limit",
+          "description": "The most stops to return."
+        }
+      }
+    },
+    "rebuild_timetable": {
+      "name": "Rebuild timetable",
+      "description": "Downloads the Ministry of Transport timetable again and rebuilds the local copy. Takes a few minutes and about 90 MB."
+    }
+  },
+  "exceptions": {
+    "stop_unavailable": {
+      "message": "Could not read arrivals for stop {stop_code}: {error}"
+    },
+    "unknown_stop": {
+      "message": "Stop {stop_code} does not exist: {error}"
+    },
+    "stop_update_failed": {
+      "message": "Could not update stop {stop_code}: {error}"
+    },
+    "no_stop_readable": {
+      "message": "None of the configured stops could be read. Retrying."
+    },
+    "invalid_target": {
+      "message": "The target is not an Israel Transit stop that is set up."
+    },
+    "index_unavailable": {
+      "message": "The local timetable is not built yet. Try again once it is."
+    },
+    "search_failed": {
+      "message": "The stop search failed: {error}"
+    },
+    "rebuild_in_progress": {
+      "message": "The timetable is already being rebuilt."
+    },
+    "rebuild_failed": {
+      "message": "Rebuilding the timetable failed: {error}"
+    }
+  },
+  "issues": {
+    "gtfs_index_failed": {
+      "title": "The Israeli public transport timetable could not be downloaded",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Rebuild the timetable",
+            "description": "Israel Transit could not build its local copy of the Ministry of Transport timetable, so light rail, the cable lines and trains have no times to show. Real-time buses are unaffected.\n\nSubmit to download the timetable again now (about 90 MB). This can take a few minutes.\n\n{error}"
+          }
+        },
+        "progress": {
+          "rebuilding": "Downloading and indexing the Ministry of Transport timetable. This can take a few minutes."
+        },
+        "error": {
+          "rebuild_failed": "The rebuild failed again. Check the network connection and free disk space, then try again.",
+          "rebuild_in_progress": "A rebuild is already running. Wait for it to finish."
+        }
+      }
+    },
+    "realtime_unavailable": {
+      "title": "Real-time arrivals are unavailable",
+      "description": "None of your bus stops has had real-time data for over half an hour, so their times come from the timetable. The real-time service (curlbus) may be down. This clears by itself once it answers again.\n\nThe last error was: {error}"
+    }
+  },
+  "triggers": {
+    "arrival": {
+      "name": "Line arrives at a stop",
+      "description": "Triggers when a vehicle reaches a stop, or a set time before or after it does. Follows the live time as it changes, and fires once per trip.",
+      "fields": {
+        "line": {
+          "name": "Line",
+          "description": "Only this line number. Leave empty for every line at the stop."
+        },
+        "offset": {
+          "name": "Offset",
+          "description": "How long before or after the arrival to trigger. Zero triggers at the arrival itself."
+        },
+        "offset_type": {
+          "name": "Before or after",
+          "description": "Whether the offset is before the arrival or after it."
+        }
+      }
+    },
+    "delay": {
+      "name": "Vehicle delayed",
+      "description": "Triggers once per trip when a vehicle is reported late by at least the given number of minutes. Delays are reported for trains with a destination set.",
+      "fields": {
+        "line": {
+          "name": "Line",
+          "description": "Only this line or train number. Leave empty for every line at the stop."
+        },
+        "min_delay": {
+          "name": "Minimum delay",
+          "description": "Trigger once the delay reaches this many minutes."
+        }
+      }
+    }
+  },
+  "conditions": {
+    "is_arriving_within": {
+      "name": "Vehicle arriving within",
+      "description": "Tests if a vehicle, of one line or any, is due at the stop within the given number of minutes.",
+      "fields": {
+        "line": {
+          "name": "Line",
+          "description": "Only this line number. Leave empty for every line at the stop."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "How soon the vehicle has to be due."
+        }
+      }
+    },
+    "is_realtime_available": {
+      "name": "Real-time is available",
+      "description": "Tests if the stop's times are live rather than from the timetable."
+    }
+  },
+  "selector": {
+    "offset_type": {
+      "options": {
+        "before": "Before",
+        "after": "After"
+      }
+    }
+  }
+}

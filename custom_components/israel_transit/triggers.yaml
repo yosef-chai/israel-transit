@@ -1,0 +1,47 @@
+.target: &stop_target
+  device:
+    integration: israel_transit
+  entity:
+    integration: israel_transit
+
+.line: &line
+  required: false
+  example: "18"
+  selector:
+    text:
+
+arrival:
+  target: *stop_target
+  fields:
+    line: *line
+    offset:
+      required: true
+      default:
+        hours: 0
+        minutes: 0
+        seconds: 0
+      selector:
+        duration:
+    offset_type:
+      required: true
+      default: before
+      selector:
+        select:
+          translation_key: offset_type
+          options:
+            - before
+            - after
+
+delay:
+  target: *stop_target
+  fields:
+    line: *line
+    min_delay:
+      required: true
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 180
+          unit_of_measurement: min
+          mode: box

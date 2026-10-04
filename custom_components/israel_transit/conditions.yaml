@@ -1,0 +1,26 @@
+.target: &stop_target
+  device:
+    integration: israel_transit
+  entity:
+    integration: israel_transit
+
+is_arriving_within:
+  target: *stop_target
+  fields:
+    line:
+      required: false
+      example: "18"
+      selector:
+        text:
+    minutes:
+      required: true
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 180
+          unit_of_measurement: min
+          mode: box
+
+is_realtime_available:
+  target: *stop_target

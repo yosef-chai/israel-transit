@@ -1,0 +1,39 @@
+[tool.mypy]
+# No explicit python_version: mypy then matches the interpreter it runs under,
+# which is what lets the same config check against whichever Home Assistant
+# release is installed.
+strict = true
+warn_unreachable = true
+show_error_codes = true
+follow_imports = "silent"
+# Home Assistant is not distributed with complete stubs for every helper.
+ignore_missing_imports = true
+# Home Assistant re-exports plenty of names without listing them in __all__
+# (websocket_api.ActiveConnection among them), which strict mode rejects.
+implicit_reexport = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+warn_return_any = true
+warn_no_return = true
+files = ["custom_components/israel_transit"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+strict = false
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC", "C4", "PL"]
+ignore = ["PLR0912", "PLR0915", "PLR2004", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests do plenty of ordinary file work inside async cases; the rule is
+# aimed at production I/O on the event loop. Their arguments are pytest
+# fixtures, injected by name, so their count says nothing about the design.
+"tests/*" = ["PLR2004", "S101", "ASYNC240", "PLR0913", "PLR0917"]
+# Fixture rows are real CSV lines and must stay on one line.
+"tests/gtfs_fixture.py" = ["E501"]

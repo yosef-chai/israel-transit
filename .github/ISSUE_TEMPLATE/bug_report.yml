@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in the integration or the card doesn't work right.
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you got instead. Screenshots help.
+    validations:
+      required: true
+  - type: input
+    id: stop
+    attributes:
+      label: Stop code
+      description: If it's about a specific stop.
+      placeholder: "21023"
+  - type: input
+    id: version
+    attributes:
+      label: Israel Transit version
+      description: HACS shows it, and so does Settings → Devices & services → Israel Transit.
+      placeholder: "1.5.0"
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      description: Settings → About.
+      placeholder: "2026.10.0"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: On the integration's page, open ⋮ → **Download diagnostics** and drag the file here.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Anything about `israel_transit` from Settings → System → Logs.
+      render: text

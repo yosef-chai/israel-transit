@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
+  validate:
+    uses: ./.github/workflows/validate.yml
+
+  # HACS דורש שהגרסה תיווצר רק אחרי שהבדיקות עברו
+  release:
+    needs: [tests, validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check versions match the tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          MANIFEST=$(jq -r .version custom_components/israel_transit/manifest.json)
+          PACKAGE=$(jq -r .version package.json)
+          echo "tag=$TAG manifest=$MANIFEST package=$PACKAGE"
+          test "$TAG" = "$MANIFEST" && test "$TAG" = "$PACKAGE"
+          grep -q "v$TAG " custom_components/israel_transit/www/israel-transit-card.js
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"

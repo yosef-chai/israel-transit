@@ -1,0 +1,172 @@
+rules:
+  # --- Bronze ---------------------------------------------------------------
+  action-setup: done
+  appropriate-polling:
+    status: done
+    comment: >-
+      60 s by default with a 30 s floor, because the real-time source is a single
+      free community service. Several open dashboards still produce one upstream
+      request per interval, and the timetable is a local SQLite read.
+  brands:
+    status: done
+    comment: >-
+      Home Assistant 2026.3 lets a custom integration carry its own brand
+      images, which made the home-assistant/brands submission route -- open to
+      core integrations only -- unnecessary. brand/ holds icon.png and
+      icon@2x.png plus dark_ variants, trimmed, transparent and square to the
+      published specification. The logo falls back to the icon, as the
+      specification prescribes for a square mark.
+  common-modules: done
+  config-flow: done
+  config-flow-test-coverage:
+    status: done
+    comment: >-
+      Every step and every outcome: single match, multiple matches, no
+      results, an unreachable data source, a duplicate stop, and both
+      reconfigure outcomes. config_flow.py is at 100%.
+  dependency-transparency:
+    status: exempt
+    comment: >-
+      There are no third-party requirements. Every line of the clients, the GTFS
+      reader and the index lives in this repository and is reviewable here.
+  docs-actions:
+    status: done
+    comment: >-
+      get_arrivals, refresh_stop, search_stops and rebuild_timetable, each with
+      its fields, its response and the errors it raises.
+  docs-conditions:
+    status: done
+    comment: >-
+      is_arriving_within and is_realtime_available, in the editor and in YAML,
+      including how several targeted stops and a stop without a board behave.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: done
+  docs-triggers:
+    status: done
+    comment: >-
+      arrival and delay, in the editor and in YAML: the offset, firing once per
+      trip, the two-minute grace past which a moment is dropped rather than
+      fired late, and that nothing waiting survives a restart.
+  entity-event-setup:
+    status: exempt
+    comment: >-
+      Entities subscribe to nothing beyond their coordinator, which
+      CoordinatorEntity already manages.
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data: done
+  test-before-configure:
+    status: done
+    comment: >-
+      The config flow searches the stop table before an entry can be created, so
+      a broken data path is reported during setup rather than after it.
+  test-before-setup: done
+  unique-config-entry:
+    status: done
+    comment: >-
+      The integration is set up once (its domain is the entry's unique id); each
+      stop is a subentry whose unique id is the Ministry stop code, so the same
+      stop cannot be added twice.
+
+  # --- Silver ---------------------------------------------------------------
+  action-exceptions: done
+  config-entry-unloading: done
+  docs-configuration-parameters: done
+  docs-installation-parameters: done
+  entity-unavailable: done
+  integration-owner: done
+  log-when-unavailable:
+    status: done
+    comment: >-
+      DataUpdateCoordinator logs the transition in both directions once. Losing
+      real-time is not unavailability -- the board falls back to the local
+      timetable -- so the coordinator logs that separately, once when it is
+      lost and once when it is back, per stop.
+  parallel-updates: done
+  reauthentication-flow:
+    status: exempt
+    comment: >-
+      No source requires credentials. The Israel Railways key is the public one
+      published in rail.co.il's own JavaScript bundle.
+  test-coverage:
+    status: done
+    comment: >-
+      95% over 250 tests. The Home Assistant level tests run against a real
+      instance, the triggers and conditions inside real automations; the
+      parsing, GTFS indexing and download tests need nothing but aiohttp and
+      build a real index from a miniature feed.
+
+  # --- Gold -----------------------------------------------------------------
+  devices: done
+  diagnostics: done
+  discovery:
+    status: exempt
+    comment: A bus stop is a place, not a device on the network.
+  discovery-update-info:
+    status: exempt
+    comment: Nothing is discovered, so there is no discovery information to update.
+  docs-data-update: done
+  docs-examples: done
+  docs-known-limitations: done
+  docs-supported-devices:
+    status: done
+    comment: >-
+      Documented as supported modes and operators rather than devices, since the
+      integration is a service.
+  docs-supported-functions: done
+  docs-troubleshooting: done
+  docs-use-cases: done
+  dynamic-devices:
+    status: done
+    comment: >-
+      Each stop is a subentry with its own device. Adding one reloads the entry
+      and its device and entities appear without a restart.
+  entity-category: done
+  entity-device-class: done
+  entity-disabled-by-default:
+    status: exempt
+    comment: >-
+      A stop creates three entities plus two per line the user explicitly chose
+      to track, so there is nothing noisy to hide.
+  entity-translations: done
+  exception-translations: done
+  icon-translations: done
+  reconfiguration-flow:
+    status: done
+    comment: >-
+      Each stop is a subentry with a reconfigure step, so its lines, interval
+      and rail destination are edited in place without losing history.
+  repair-issues:
+    status: done
+    comment: >-
+      Two, both actionable. A timetable that cannot be built -- which silently
+      removes light rail, the cable lines and trains -- is fixable: its flow
+      rebuilds the index with progress, and stays open with the error if the
+      rebuild fails. Every bus stop without real-time for half an hour says the
+      board is a timetable for now, and clears itself once real-time returns.
+  stale-devices:
+    status: done
+    comment: >-
+      Removing a stop subentry removes its device, and
+      async_remove_config_entry_device lets a stop be deleted from its own
+      device page without touching the others.
+
+  # --- Platinum -------------------------------------------------------------
+  async-dependency:
+    status: done
+    comment: >-
+      There is no external dependency. All I/O is aiohttp; the CPU-bound GTFS
+      parse and the SQLite reads run in the executor so the event loop is never
+      blocked.
+  inject-websession:
+    status: done
+    comment: >-
+      Every client is constructed with async_get_clientsession(hass), including
+      the GTFS downloader.
+  strict-typing:
+    status: done
+    comment: >-
+      mypy --strict passes with no ignores and no per-module exemptions,
+      checked against the Home Assistant release this targets. The package
+      ships py.typed.

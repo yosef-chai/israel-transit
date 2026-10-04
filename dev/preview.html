@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Israel Transit card preview</title>
+    <style>
+      /* A rough stand-in for Home Assistant's theme tokens, so the card can be
+         checked outside a running instance. */
+      :root {
+        --primary-text-color: #212121;
+        --secondary-text-color: #727272;
+        --primary-color: #03a9f4;
+        --success-color: #43a047;
+        --warning-color: #ffa600;
+        --error-color: #db4437;
+        --divider-color: rgba(0, 0, 0, 0.12);
+        --card-background-color: #fff;
+        --ha-card-border-radius: 12px;
+        --ha-color-surface-low: rgba(0, 0, 0, 0.06);
+        --ha-color-surface-lower: rgba(0, 0, 0, 0.04);
+        --primary-background-color: #f2f4f6;
+        font-family: Roboto, "Segoe UI", system-ui, sans-serif;
+      }
+      body.dark {
+        --primary-text-color: #e1e1e1;
+        --secondary-text-color: #9b9b9b;
+        --divider-color: rgba(255, 255, 255, 0.12);
+        --card-background-color: #1c1c1c;
+        --ha-color-surface-low: rgba(255, 255, 255, 0.08);
+        --ha-color-surface-lower: rgba(255, 255, 255, 0.05);
+        --primary-background-color: #111213;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: var(--primary-background-color);
+        color: var(--primary-text-color);
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        margin-block-end: 16px;
+        flex-wrap: wrap;
+      }
+      button.tool {
+        padding: 6px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--divider-color);
+        background: var(--card-background-color);
+        color: inherit;
+        cursor: pointer;
+      }
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        align-items: start;
+      }
+      .col {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .col > h3 {
+        margin: 0;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        color: var(--secondary-text-color);
+      }
+      .narrow {
+        max-width: 300px;
+      }
+      .checks {
+        align-self: center;
+        font-size: 0.8125rem;
+        font-family: ui-monospace, monospace;
+      }
+      .checks.pass {
+        color: #2f7d4f;
+      }
+      .checks.fail {
+        color: #db4437;
+        font-weight: 700;
+      }
+      /* The stub dialog lays itself out in the page when pinned; see below. */
+      .pinned > * {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button class="tool" id="theme">Toggle dark</button>
+      <button class="tool" id="dir">Toggle LTR / RTL</button>
+      <span id="checks" class="checks">self-checks…</span>
+    </div>
+
+    <div class="grid">
+      <div class="col">
+        <h3>Bus stop, live (21023)</h3>
+        <israel-transit-card id="bus"></israel-transit-card>
+      </div>
+      <div class="col">
+        <h3>Light rail, timetable only (6185)</h3>
+        <israel-transit-card id="tram"></israel-transit-card>
+      </div>
+      <div class="col">
+        <h3>Dankal 35962 - curlbus 500, timetable from GTFS</h3>
+        <israel-transit-card id="broken"></israel-transit-card>
+      </div>
+      <div class="col narrow">
+        <h3>Narrow column, filtered to line 36</h3>
+        <israel-transit-card id="narrow"></israel-transit-card>
+      </div>
+      <div class="col">
+        <h3>Every detail off but the essentials</h3>
+        <israel-transit-card id="bare"></israel-transit-card>
+      </div>
+      <div class="col">
+        <h3>2 lines max, ordered 480 then 36, clock + mode icon</h3>
+        <israel-transit-card id="ordered"></israel-transit-card>
+      </div>
+      <div class="col">
+        <h3>Line detail: map, legend, timeline</h3>
+        <div id="route-host" class="pinned"></div>
+      </div>
+      <div class="col">
+        <h3>Line detail: no vehicle broadcast</h3>
+        <div id="route-host-2" class="pinned"></div>
+      </div>
+      <div class="col">
+        <h3>Visual editor (config round-trip)</h3>
+        <div id="editor-host"></div>
+        <pre id="editor-config" style="font-size:.6875rem;white-space:pre-wrap;margin:0;
+             color:var(--secondary-text-color)"></pre>
+        <israel-transit-card id="editor-preview"></israel-transit-card>
+      </div>
+    </div>
+
+    <script type="module">
+      // --- minimal stand-ins for the Home Assistant elements the card uses ---
+      const define = (tag, klass) =>
+        !customElements.get(tag) && customElements.define(tag, klass);
+
+      define(
+        "ha-card",
+        class extends HTMLElement {
+          connectedCallback() {
+            this.style.cssText =
+              "display:block;background:var(--card-background-color);" +
+              "border-radius:var(--ha-card-border-radius);" +
+              "box-shadow:0 2px 6px rgba(0,0,0,.14);overflow:hidden";
+          }
+        },
+      );
+
+      define(
+        "ha-icon",
+        class extends HTMLElement {
+          connectedCallback() {
+            this.style.cssText =
+              "display:inline-block;width:20px;height:20px;flex:0 0 auto;" +
+              "border-radius:50%;background:currentColor;opacity:.45";
+          }
+        },
+      );
+
+      class FakeDialog extends HTMLElement {
+        set open(value) {
+          this.style.display = value ? "block" : "none";
+          if (value) this._render();
+        }
+        _render() {
+          if (this._built) return;
+          this._built = true;
+          this.style.cssText =
+            "position:fixed;inset:auto 0 0 0;max-height:80vh;overflow:auto;z-index:9;" +
+            "margin:auto;max-width:560px;background:var(--card-background-color);" +
+            "border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,.2);padding:16px";
+          const header = document.createElement("div");
+          header.style.cssText =
+            "display:flex;justify-content:space-between;align-items:start;margin-block-end:12px";
+          header.innerHTML =
+            `<div><div style="font-size:1.25rem">${this.getAttribute("header-title") || ""}</div>` +
+            `<div style="font-size:.8125rem;color:var(--secondary-text-color)">${
+              this.getAttribute("header-subtitle") || ""
+            }</div></div>`;
+          const close = document.createElement("button");
+          close.textContent = "×";
+          close.style.cssText =
+            "border:none;background:none;font-size:1.5rem;cursor:pointer;color:inherit";
+          close.onclick = () => this.dispatchEvent(new CustomEvent("closed"));
+          header.appendChild(close);
+          this.prepend(header);
+        }
+      }
+      define("ha-adaptive-dialog", FakeDialog);
+      define("ha-dialog", class extends FakeDialog {});
+
+      define(
+        "ha-textfield",
+        class extends HTMLElement {
+          connectedCallback() {
+            const input = document.createElement("input");
+            input.placeholder = this.label || this.getAttribute("label") || "";
+            input.style.cssText =
+              "width:100%;padding:10px;border-radius:8px;box-sizing:border-box;" +
+              "border:1px solid var(--divider-color);background:transparent;color:inherit";
+            input.addEventListener("input", (e) => {
+              this.value = e.target.value;
+            });
+            this.appendChild(input);
+          }
+        },
+      );
+
+      define(
+        "ha-button",
+        class extends HTMLElement {
+          connectedCallback() {
+            this.style.cssText =
+              "cursor:pointer;padding:6px 10px;border-radius:8px;" +
+              "border:1px solid var(--divider-color);font-size:.875rem";
+          }
+        },
+      );
+
+      define(
+        "ha-form",
+        class extends HTMLElement {
+          connectedCallback() {
+            this.style.cssText =
+              "display:block;padding:10px;border:1px dashed var(--divider-color);" +
+              "border-radius:8px;font-size:.8125rem;color:var(--secondary-text-color)";
+            queueMicrotask(() => {
+              const flatten = (schema) =>
+                (schema || []).flatMap((s) => (s.schema ? flatten(s.schema) : [s]));
+              const names = flatten(this.schema)
+                .map((s) => {
+                  const value = this.data?.[s.name];
+                  const label = this.computeLabel?.(s) ?? s.name;
+                  return typeof value === "boolean"
+                    ? `${label}=${value ? "on" : "off"}`
+                    : `${label}=${value ?? "-"}`;
+                })
+                .filter(Boolean);
+              this.textContent = `ha-form: ${names.join(" · ")}`;
+            });
+          }
+        },
+      );
+
+      // A stand-in for ha-map: plots the same paths on an SVG so the route
+      // line, the vehicle point and the framing can all be seen.
+      define(
+        "ha-map",
+        class extends HTMLElement {
+          constructor() {
+            super();
+            this.leafletMap = { stub: true };
+          }
+          set paths(value) {
+            this._paths = value;
+            this._draw();
+          }
+          fitBounds(points) {
+            this._bounds = points;
+            this._draw();
+          }
+          _draw() {
+            const paths = this._paths || [];
+            const all = paths.flatMap((p) => p.points.map((pt) => pt.point));
+            if (!all.length) return;
+            const lats = all.map((p) => p[0]);
+            const lons = all.map((p) => p[1]);
+            const [y0, y1] = [Math.min(...lats), Math.max(...lats)];
+            const [x0, x1] = [Math.min(...lons), Math.max(...lons)];
+            const at = (p) => [
+              ((p[1] - x0) / (x1 - x0 || 1)) * 260 + 20,
+              200 - ((p[0] - y0) / (y1 - y0 || 1)) * 160,
+            ];
+            const draw = paths
+              .map((path) => {
+                const pts = path.points.map((pt) => at(pt.point));
+                const line =
+                  pts.length > 1
+                    ? `<polyline points="${pts.map((p) => p.join(",")).join(" ")}"
+                         fill="none" stroke="${path.color}" stroke-width="3"/>`
+                    : "";
+                const dots = pts
+                  .map(
+                    (p) =>
+                      `<circle cx="${p[0]}" cy="${p[1]}" r="${pts.length > 1 ? 4 : 8}"
+                        fill="${path.color}"/>`,
+                  )
+                  .join("");
+                return line + dots;
+              })
+              .join("");
+            this.style.cssText =
+              "display:block;background:var(--ha-color-surface-low);position:relative";
+            this.innerHTML =
+              `<svg viewBox="0 0 300 220" style="width:100%;height:100%">${draw}</svg>` +
+              `<span style="position:absolute;inset-block-start:4px;inset-inline-start:8px;` +
+              `font-size:.6875rem;color:var(--secondary-text-color)">` +
+              `ha-map · fit ${this._bounds ? this._bounds.length : 0} pts</span>`;
+          }
+        },
+      );
+
+      // --- captured fixtures ------------------------------------------------
+      const iso = (minutesFromNow) =>
+        new Date(Date.now() + minutesFromNow * 60000).toISOString();
+
+      const FIXTURES = {
+        21023: {
+          stop: {
+            code: 21023,
+            name: "ת. רכבת השלום",
+            city: "תל אביב יפו",
+            street: "גבעת התחמושת",
+            lat: 32.072666,
+            lon: 34.79339,
+          },
+          has_realtime: true,
+          realtime_error: null,
+          arrivals: [
+            {
+              line_name: "36", line_ref: "960", destination: "מסוף אור יהודה",
+              operator: "מטרופולין", route_type: "3", is_realtime: true,
+              eta: iso(0), vehicle_lat: 32.0739, vehicle_lon: 34.7837,
+              departed: iso(-22), platform: null, delay_minutes: null,
+            },
+            {
+              line_name: "91", line_ref: "16352", destination: "מסוף הטייסים",
+              operator: "מטרופולין", route_type: "3", is_realtime: true,
+              eta: iso(4), vehicle_lat: 32.06, vehicle_lon: 34.79,
+              departed: iso(-14), platform: null, delay_minutes: null,
+            },
+            {
+              line_name: "480", line_ref: "7020", destination: "ירושלים",
+              operator: "אגד", route_type: "3", is_realtime: true,
+              eta: iso(11), platform: null, delay_minutes: null,
+            },
+            {
+              line_name: "142", line_ref: "812", destination: "רמת גן",
+              operator: "דן", route_type: "3", is_realtime: true, eta: iso(19),
+            },
+            {
+              line_name: "1", line_ref: "29950", destination: "נהריה",
+              operator: "רכבת ישראל", route_type: "2", is_realtime: true,
+              eta: iso(26), platform: "3", delay_minutes: 4,
+            },
+            {
+              line_name: "5", line_ref: "1200", destination: "בת ים",
+              operator: "דן", route_type: "3", is_realtime: false, eta: iso(72),
+            },
+          ],
+          routes: [
+            { line_name: "36", destination: "מסוף אור יהודה", operator: "מטרופולין", route_type: "3", has_realtime: true, line_ref: "960" },
+            { line_name: "91", destination: "מסוף הטייסים", operator: "מטרופולין", route_type: "3", has_realtime: true, line_ref: "16352" },
+            { line_name: "480", destination: "ירושלים", operator: "אגד", route_type: "3", has_realtime: true, line_ref: "7020" },
+            { line_name: "1", destination: "נהריה", operator: "רכבת ישראל", route_type: "2", has_realtime: false, line_ref: "29950" },
+          ],
+        },
+        6185: {
+          stop: { code: 6185, name: "הר הרצל", city: "ירושלים", street: "שדרות הרצל", lat: 31.77, lon: 35.18 },
+          has_realtime: false,
+          realtime_error: null,
+          arrivals: [
+            { line_name: "1", line_ref: "10747", destination: "הדסה עין כרם", operator: "כפיר", route_type: "0", is_realtime: false, eta: iso(3) },
+            { line_name: "1", line_ref: "10747", destination: "הדסה עין כרם", operator: "כפיר", route_type: "0", is_realtime: false, eta: iso(8) },
+            { line_name: "1", line_ref: "10746", destination: "נווה יעקב", operator: "כפיר", route_type: "0", is_realtime: false, eta: iso(13) },
+          ],
+          routes: [
+            { line_name: "1", destination: "הדסה עין כרם", operator: "כפיר", route_type: "0", has_realtime: false, line_ref: "10747" },
+            { line_name: "1", destination: "נווה יעקב", operator: "כפיר", route_type: "0", has_realtime: false, line_ref: "10746" },
+          ],
+        },
+        35962: {
+          stop: { code: 35962, name: "הקוממיות", city: "בת ים", street: "אנה פרנק", lat: 32.01, lon: 34.75 },
+          has_realtime: false,
+          realtime_error: "curlbus HTTP 500 for stop 35962",
+          arrivals: [
+            { line_name: "1", line_ref: "34447", destination: "בת ים_הקוממיות", operator: "תבל", route_type: "0", is_realtime: false, eta: iso(5) },
+            { line_name: "1", line_ref: "34448", destination: "פתח תקווה_ת. מרכזית", operator: "תבל", route_type: "0", is_realtime: false, eta: iso(6) },
+            { line_name: "2", line_ref: "34445", destination: "פתח תקווה_קרית אריה", operator: "תבל", route_type: "0", is_realtime: false, eta: iso(16) },
+          ],
+          routes: [
+            { line_name: "1", destination: "בת ים_הקוממיות", operator: "תבל", route_type: "0", has_realtime: false, line_ref: "34447" },
+            { line_name: "2", destination: "פתח תקווה_קרית אריה", operator: "תבל", route_type: "0", has_realtime: false, line_ref: "34445" },
+          ],
+        },
+      };
+
+      // The backend stores offsets from the start of a run and turns them into
+      // absolute times only when the caller passes the vehicle's departure.
+      const ROUTE_PATTERN = [
+        { sequence: 1, code: 21000, name: "תחנה מרכזית", city: "תל אביב יפו", lat: 32.055, lon: 34.78, offset_seconds: 0 },
+        { sequence: 2, code: 21010, name: "יהודה הלוי/אלנבי", city: "תל אביב יפו", lat: 32.065, lon: 34.775, offset_seconds: 480 },
+        { sequence: 3, code: 21023, name: "ת. רכבת השלום", city: "תל אביב יפו", lat: 32.0727, lon: 34.7934, offset_seconds: 1320 },
+        { sequence: 4, code: 21030, name: "אבא הלל/ז'בוטינסקי", city: "רמת גן", lat: 32.083, lon: 34.805, offset_seconds: 1740 },
+        { sequence: 5, code: 21040, name: "מסוף אור יהודה", city: "אור יהודה", lat: 32.021, lon: 34.854, offset_seconds: 2580 },
+      ];
+
+      const routeStops = (departed) =>
+        ROUTE_PATTERN.map((stop) => ({
+          ...stop,
+          arrival_time: departed
+            ? new Date(Date.parse(departed) + stop.offset_seconds * 1000).toISOString()
+            : null,
+        }));
+
+      const SEARCH = [
+        { code: 21023, name: "ת. רכבת השלום", city: "תל אביב יפו", street: "גבעת התחמושת" },
+        { code: 21024, name: "ת. רכבת השלום/הורדה", city: "תל אביב יפו", street: "גבעת התחמושת" },
+        { code: 6185, name: "הר הרצל", city: "ירושלים", street: "שדרות הרצל" },
+      ];
+
+      const hass = {
+        locale: { language: "he" },
+        language: "he",
+        states: {},
+        callWS: async (msg) => {
+          await new Promise((r) => setTimeout(r, 60));
+          if (msg.type.endsWith("/stop")) {
+            const data = FIXTURES[msg.stop_code];
+            if (!data) throw new Error(`Unknown stop code ${msg.stop_code}`);
+            return data;
+          }
+          if (msg.type.endsWith("/stop_routes")) {
+            return FIXTURES[msg.stop_code]?.routes ?? [];
+          }
+          if (msg.type.endsWith("/route_stops")) return routeStops(msg.departed);
+          if (msg.type.endsWith("/search_stops")) return SEARCH;
+          throw new Error(`unhandled ${msg.type}`);
+        },
+      };
+
+      window.loadCardHelpers = async () => null;
+
+      // --- mount ------------------------------------------------------------
+      await import("../custom_components/israel_transit/www/israel-transit-card.js");
+
+      const mount = (id, config) => {
+        const card = document.getElementById(id);
+        card.setConfig(config);
+        card.hass = hass;
+      };
+
+      mount("bus", { stop_code: 21023 });
+      mount("tram", { stop_code: 6185, max_arrivals: 4 });
+      mount("broken", { stop_code: 35962 });
+      mount("narrow", { stop_code: 21023, lines: ["36"], max_arrivals: 3 });
+      mount("bare", {
+        stop_code: 21023,
+        max_arrivals: 4,
+        show_header: false,
+        show_destination: false,
+        show_operator: false,
+        show_realtime_tag: false,
+        show_platform: false,
+        show_delay: false,
+      });
+      mount("ordered", {
+        stop_code: 21023,
+        lines: ["480", "36", "91"],
+        order: "lines",
+        max_lines: 2,
+        max_arrivals: 6,
+        show_clock: true,
+        show_mode_icon: true,
+      });
+
+      // The two dialog states worth looking at side by side.
+      const pinDialog = async (hostId, arrival, stopCode) => {
+        const dialog = document.createElement("israel-transit-route-dialog");
+        dialog.hass = hass;
+        dialog.arrival = arrival;
+        dialog.stopCode = stopCode;
+        dialog.showMap = true;
+        document.getElementById(hostId).appendChild(dialog);
+        dialog.open = true;
+        await dialog.updateComplete;
+        // Lay the stub dialog out in the page rather than over it, so its map,
+        // legend and timeline can be seen beside everything else.
+        const sheet = dialog.shadowRoot.querySelector("ha-adaptive-dialog, ha-dialog");
+        Object.assign(sheet.style, {
+          display: "block",
+          position: "static",
+          maxHeight: "none",
+          inset: "auto",
+        });
+        return dialog;
+      };
+      // line 91 has a position two stops back; 480 broadcasts none at all.
+      pinDialog("route-host", FIXTURES[21023].arrivals[1], 21023);
+      pinDialog("route-host-2", FIXTURES[21023].arrivals[2], 21023);
+
+      const editor = document.createElement("israel-transit-card-editor");
+      editor.hass = hass;
+      // hui-element-editor feeds every config-changed straight back into
+      // setConfig. Doing the same here is what makes changing the stop in this
+      // harness the same code path it takes inside Home Assistant.
+      editor.addEventListener("config-changed", (ev) => {
+        ev.stopPropagation();
+        editor.setConfig(ev.detail.config);
+        document.getElementById("editor-config").textContent = JSON.stringify(
+          ev.detail.config,
+        );
+        // And the live preview beside it, which is what the user watches.
+        try {
+          document.getElementById("editor-preview").setConfig(ev.detail.config);
+        } catch (err) {
+          document.getElementById("editor-config").textContent = String(err);
+        }
+      });
+      editor.setConfig({ stop_code: 21023, max_arrivals: 6, lines: ["480", "36"] });
+      document.getElementById("editor-host").appendChild(editor);
+      document.getElementById("editor-preview").setConfig({ stop_code: 21023 });
+      document.getElementById("editor-preview").hass = hass;
+
+      // --- self-checks ------------------------------------------------------
+      // Two behaviours that break silently: the card would go on showing the
+      // old stop, and the editor would stop round-tripping its config. Both
+      // look fine in a screenshot, so they are asserted rather than eyeballed.
+      const selfChecks = async () => {
+        const failures = [];
+        // Fixed sleeps are unreliable here: a background tab throttles timers
+        // to about a second, which is longer than any of these steps expect.
+        const until = async (predicate, what, ms = 8000) => {
+          const deadline = performance.now() + ms;
+          while (performance.now() < deadline) {
+            if (predicate()) return true;
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          failures.push(`timed out waiting for ${what}`);
+          return false;
+        };
+        const probe = document.createElement("israel-transit-card");
+        document.body.appendChild(probe);
+        probe.hass = {
+          ...hass,
+          callWS: async (msg) => {
+            // The old stop answers slowly, the new one quickly.
+            if (msg.type.endsWith("/stop") && msg.stop_code === 21023) {
+              await new Promise((r) => setTimeout(r, 400));
+            }
+            return hass.callWS(msg);
+          },
+        };
+        probe.setConfig({ stop_code: 21023 });
+        probe.setConfig({ stop_code: 6185 });
+        await until(() => probe._data, "the arrival board");
+        // Give the slow answer for the replaced stop time to land late.
+        await new Promise((r) => setTimeout(r, 900));
+        if (probe._data?.stop?.code !== 6185) {
+          failures.push(`stale answer won: showing ${probe._data?.stop?.code}`);
+        }
+        probe.remove();
+
+        // Changing the stop has to survive the config being echoed back.
+        const ed = document.createElement("israel-transit-card-editor");
+        ed.hass = hass;
+        ed.addEventListener("config-changed", (ev) => ed.setConfig(ev.detail.config));
+        ed.setConfig({ stop_code: 21023 });
+        document.body.appendChild(ed);
+        await ed.updateComplete;
+        ed.shadowRoot.querySelector(".selected .chip").click();
+        await ed.updateComplete;
+        const box = ed.shadowRoot.querySelector("#it-search");
+        if (!box) failures.push("no search box after 'change stop'");
+        else {
+          box.value = "הרצל";
+          box.dispatchEvent(new Event("input", { bubbles: true }));
+          await until(
+            () => ed.shadowRoot.querySelector(".result"),
+            "search results",
+          );
+          const hit = [...ed.shadowRoot.querySelectorAll(".result")].find((b) =>
+            b.textContent.includes("6185"),
+          );
+          if (!hit) failures.push("search returned no usable result");
+          else {
+            hit.click();
+            await until(() => ed._config.stop_code === 6185, "the picked stop");
+          }
+        }
+        ed.remove();
+
+        // Home Assistant listens for "dialog-closed" on the document and reads
+        // ev.detail.dialog off it. A bare event of that name from this card
+        // crashed HA's quick-bar mixin on every close, and nothing in the card
+        // itself looked wrong -- so it is asserted here.
+        let escaped = null;
+        const spy = (ev) => (escaped = ev.type);
+        document.addEventListener("dialog-closed", spy);
+        const dlg = document.createElement("israel-transit-route-dialog");
+        dlg.hass = hass;
+        dlg.arrival = FIXTURES[21023].arrivals[0];
+        document.body.appendChild(dlg);
+        dlg.open = true;
+        await dlg.updateComplete;
+        let heard = false;
+        dlg.addEventListener("israel-transit-dialog-closed", () => (heard = true));
+        dlg._closed();
+        await new Promise((r) => setTimeout(r, 50));
+        document.removeEventListener("dialog-closed", spy);
+        if (escaped) failures.push(`"${escaped}" escaped to the document`);
+        if (!heard) failures.push("the card's own close event never fired");
+        dlg.remove();
+
+        // A card added from the picker has no stop yet. That is a card being
+        // set up, not a broken one, and must not render as an error.
+        const fresh = document.createElement("israel-transit-card");
+        document.body.appendChild(fresh);
+        try {
+          fresh.setConfig({ type: "custom:israel-transit-card", stop_code: null });
+          fresh.hass = hass;
+          await fresh.updateComplete;
+          if (!fresh.shadowRoot.querySelector(".empty")) {
+            failures.push("a card without a stop rendered no 'no stop' message");
+          }
+        } catch (err) {
+          failures.push(`a card without a stop threw: ${err}`);
+        }
+        fresh.remove();
+
+        // One failed poll -- Home Assistant restarting, say -- must not blank a
+        // board that was showing good times a moment ago.
+        let failing = false;
+        const flaky = document.createElement("israel-transit-card");
+        document.body.appendChild(flaky);
+        flaky.setConfig({ stop_code: 21023 });
+        flaky.hass = {
+          ...hass,
+          callWS: async (msg) => {
+            if (failing) throw { code: 3, message: "Connection lost" };
+            return hass.callWS(msg);
+          },
+        };
+        await until(() => flaky._data, "the flaky card's board");
+        failing = true;
+        await flaky._refresh();
+        await flaky.updateComplete;
+        if (!flaky.shadowRoot.querySelector(".row")) {
+          failures.push("a failed poll blanked the board");
+        }
+        if (!flaky.shadowRoot.querySelector(".stale")) {
+          failures.push("a failed poll left no sign the times are stale");
+        }
+
+        // A vehicle that has left drops off between polls, on the tick.
+        const gone = new Date(Date.now() - 90000).toISOString();
+        const due = new Date(Date.now() + 30000).toISOString();
+        flaky._error = null;
+        flaky._data = {
+          ...flaky._data,
+          arrivals: [
+            { ...FIXTURES[21023].arrivals[0], line_name: "GONE", eta: gone },
+            { ...FIXTURES[21023].arrivals[0], line_name: "DUE", eta: due },
+          ],
+        };
+        flaky._tick = Date.now();
+        await flaky.updateComplete;
+        const shown = [...flaky.shadowRoot.querySelectorAll(".badge")].map((b) =>
+          b.textContent.trim(),
+        );
+        if (shown.includes("GONE")) failures.push("a departed vehicle stayed on");
+        if (!shown.includes("DUE")) failures.push("a vehicle due now was dropped");
+        flaky.remove();
+
+        // The clock follows the profile's 12/24-hour setting, as HA's own UI does.
+        const ampm = document.createElement("israel-transit-card");
+        document.body.appendChild(ampm);
+        ampm.setConfig({ stop_code: 21023 });
+        ampm.hass = { ...hass, locale: { language: "en", time_format: "12" } };
+        await until(() => ampm._data, "the 12-hour card's board");
+        ampm._data = {
+          ...ampm._data,
+          arrivals: [
+            {
+              ...FIXTURES[21023].arrivals[0],
+              eta: new Date(Date.now() + 2 * 3600000).toISOString(),
+            },
+          ],
+        };
+        await ampm.updateComplete;
+        const clock = ampm.shadowRoot.querySelector(".eta-clock")?.textContent ?? "";
+        if (!/AM|PM/.test(clock)) {
+          failures.push(`12-hour profile, but the clock reads "${clock}"`);
+        }
+        ampm.remove();
+
+        // The editor writes only what differs from the defaults, however much
+        // ha-form hands back.
+        const ed2 = document.createElement("israel-transit-card-editor");
+        ed2.hass = hass;
+        let emitted = null;
+        ed2.addEventListener("config-changed", (ev) => (emitted = ev.detail.config));
+        ed2.setConfig({ type: "custom:israel-transit-card", stop_code: 21023 });
+        document.body.appendChild(ed2);
+        await ed2.updateComplete;
+        ed2.shadowRoot.querySelector("ha-form")?.dispatchEvent(
+          new CustomEvent("value-changed", {
+            detail: {
+              value: {
+                max_arrivals: 6,
+                max_lines: 0,
+                order: "time",
+                show_header: true,
+                show_city: true,
+                show_clock: true,
+                show_map: true,
+                title: "",
+              },
+            },
+          }),
+        );
+        const want = { type: "custom:israel-transit-card", stop_code: 21023, show_clock: true };
+        if (JSON.stringify(emitted) !== JSON.stringify(want)) {
+          failures.push(`the editor wrote ${JSON.stringify(emitted)}`);
+        }
+        ed2.remove();
+
+        const out = document.getElementById("checks");
+        out.className = `checks ${failures.length ? "fail" : "pass"}`;
+        out.textContent = failures.length
+          ? `self-checks FAILED: ${failures.join("; ")}`
+          : "self-checks pass";
+      };
+      await selfChecks();
+
+      document.getElementById("theme").onclick = () =>
+        document.body.classList.toggle("dark");
+      document.getElementById("dir").onclick = () => {
+        const html = document.documentElement;
+        html.dir = html.dir === "rtl" ? "ltr" : "rtl";
+      };
+
+      window.__ready = true;
+    </script>
+  </body>
+</html>

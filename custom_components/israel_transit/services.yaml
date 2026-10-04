@@ -1,0 +1,46 @@
+get_arrivals:
+  fields:
+    stop_code:
+      required: true
+      example: 21023
+      selector:
+        number:
+          min: 1
+          max: 999999
+          mode: box
+    lines:
+      required: false
+      example: ["18", "480"]
+      selector:
+        text:
+          multiple: true
+    rail_destination:
+      required: false
+      example: "680"
+      selector:
+        text:
+
+refresh_stop:
+  target:
+    device:
+      integration: israel_transit
+    entity:
+      integration: israel_transit
+
+search_stops:
+  fields:
+    query:
+      required: true
+      example: "כפר סבא ויצמן"
+      selector:
+        text:
+    limit:
+      required: false
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 50
+          mode: box
+
+rebuild_timetable:

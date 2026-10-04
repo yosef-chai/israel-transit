@@ -1,0 +1,20 @@
+{
+  "domain": "israel_transit",
+  "name": "Israel Transit",
+  "codeowners": [
+    "@yosef-chai"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "lovelace",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/yosef-chai/israel-transit",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/yosef-chai/israel-transit/issues",
+  "quality_scale": "platinum",
+  "requirements": [],
+  "version": "1.5.0"
+}
