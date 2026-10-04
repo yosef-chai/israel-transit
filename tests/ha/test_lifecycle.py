@@ -39,7 +39,7 @@ from custom_components.israel_transit.const import (
     INTEGRATION_TITLE,
 )
 
-from .conftest import STOP, make_arrival, stop_subentry
+from .conftest import STOP, make_arrival, stop_device, stop_subentry
 
 RAIL_ROUTE = RouteInfo(
     route_id=29950,
@@ -635,8 +635,7 @@ async def test_deleting_a_stops_device_deletes_only_that_stop(
     # delete at all; without it the stop's page has no way out.
     assert entry.supports_remove_device
 
-    devices = dr.async_get(hass)
-    device = devices.async_get_device(identifiers={(DOMAIN, "20092")})
+    device = stop_device(hass, "20092")
     assert device is not None
 
     assert await async_remove_config_entry_device(hass, entry, device)
@@ -644,7 +643,7 @@ async def test_deleting_a_stops_device_deletes_only_that_stop(
 
     assert {sub.unique_id for sub in entry.subentries.values()} == {"21023", "26544"}
     assert _stops_with_entities(hass, entry) == {"21023", "26544"}
-    assert devices.async_get_device(identifiers={(DOMAIN, "20092")}) is None
+    assert stop_device(hass, "20092") is None
 
 
 async def test_deleting_a_stops_device_from_the_ui_succeeds(
@@ -665,7 +664,7 @@ async def test_deleting_a_stops_device_from_the_ui_succeeds(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     devices = dr.async_get(hass)
-    device = devices.async_get_device(identifiers={(DOMAIN, "20092")})
+    device = stop_device(hass, "20092")
     assert device is not None
 
     client = await hass_ws_client(hass)

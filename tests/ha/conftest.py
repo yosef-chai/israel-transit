@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from homeassistant.config_entries import ConfigSubentryData
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.israel_transit.api import Arrival, RouteInfo, Stop
@@ -134,6 +135,22 @@ def mock_card_registration() -> Generator[None]:
         "custom_components.israel_transit._async_register_card", return_value=None
     ):
         yield
+
+
+def stop_device(hass: HomeAssistant, code: str) -> dr.DeviceEntry | None:
+    """The stop's device, on every supported Home Assistant version.
+
+    async_get_device(identifiers=...) is deprecated in newer releases; scanning
+    the registry works the same on all of them.
+    """
+    return next(
+        (
+            device
+            for device in dr.async_get(hass).devices.values()
+            if (DOMAIN, code) in device.identifiers
+        ),
+        None,
+    )
 
 
 def stop_subentry(code: int = 21023, **data: Any) -> ConfigSubentryData:

@@ -18,7 +18,6 @@ from homeassistant.components import automation
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import condition as condition_helper
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.trigger import TriggerConfig
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -33,7 +32,7 @@ from custom_components.israel_transit.api import Arrival, IsraelTransitError
 from custom_components.israel_transit.const import DOMAIN
 from custom_components.israel_transit.trigger import ArrivalTrigger
 
-from .conftest import STOP
+from .conftest import STOP, stop_device
 
 START = datetime(2026, 10, 4, 9, 0, tzinfo=dt_util.UTC)
 
@@ -83,7 +82,7 @@ async def entry(
 
 @pytest.fixture
 def stop_target(hass: HomeAssistant, entry: MockConfigEntry) -> dict[str, Any]:
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, "21023")})
+    device = stop_device(hass, "21023")
     assert device is not None
     return {"device_id": [device.id]}
 

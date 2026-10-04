@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers import device_registry as dr
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -30,7 +29,7 @@ from custom_components.israel_transit.const import (
     SUBENTRY_TYPE_STOP,
 )
 
-from .conftest import DANKAL, STOP, stop_subentry
+from .conftest import DANKAL, STOP, stop_device, stop_subentry
 
 RAIL_ROUTE = RouteInfo(
     route_id=29950,
@@ -247,8 +246,7 @@ async def test_reconfigure_can_clear_the_train_destination(
     await hass.async_block_till_done()
     subentry = next(iter(entry.subentries.values()))
     assert subentry.data[CONF_RAIL_DESTINATION] == "3700"
-    devices = dr.async_get(hass)
-    device = devices.async_get_device(identifiers={(DOMAIN, "21023")})
+    device = stop_device(hass, "21023")
     assert device is not None
 
     result = await hass.config_entries.subentries.async_init(
@@ -266,7 +264,7 @@ async def test_reconfigure_can_clear_the_train_destination(
     assert updated.data[CONF_STOP_CODE] == 21023
     assert updated.data[CONF_STOP_NAME] == STOP.name
     assert (updated.unique_id, updated.title) == (subentry.unique_id, subentry.title)
-    after = devices.async_get_device(identifiers={(DOMAIN, "21023")})
+    after = stop_device(hass, "21023")
     assert after is not None and after.id == device.id
     assert subentry.subentry_id in after.config_entries_subentries[entry.entry_id]
 

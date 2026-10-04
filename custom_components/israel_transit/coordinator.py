@@ -113,7 +113,9 @@ class Clients:
         self.index = GtfsIndex(hass)
         self.stops = StopRegistry(hass)
         self._pending_index: CALLBACK_TYPE | None = None
-        self._last_timetable_request = 0.0
+        # monotonic() מתחיל סמוך לאתחול המכונה, ולכן 0 היה חוסם את הבקשה הראשונה
+        # בחצי השעה הראשונה אחרי הפעלה.
+        self._last_timetable_request = -TIMETABLE_REQUEST_COOLDOWN
         # תחנה -> מתי היה לה זמן אמת לאחרונה. נמדד מההפעלה: תקלה שהתחילה לפניה
         # אינה ידועה, ואין סיבה לפתוח עליה תקלה ברגע הראשון.
         self._started = monotonic()

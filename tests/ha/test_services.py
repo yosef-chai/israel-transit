@@ -9,7 +9,6 @@ import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import condition as condition_helper
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import service as service_helper
 from homeassistant.helpers import trigger as trigger_helper
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -22,11 +21,11 @@ from custom_components.israel_transit.const import (
     SERVICE_SEARCH_STOPS,
 )
 
-from .conftest import DANKAL, STOP
+from .conftest import DANKAL, STOP, stop_device
 
 
 def _stop_device_id(hass: HomeAssistant) -> str:
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, "21023")})
+    device = stop_device(hass, "21023")
     assert device is not None
     return device.id
 
