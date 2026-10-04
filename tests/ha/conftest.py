@@ -140,13 +140,16 @@ def mock_card_registration() -> Generator[None]:
 def stop_device(hass: HomeAssistant, code: str) -> dr.DeviceEntry | None:
     """The stop's device, on every supported Home Assistant version.
 
-    async_get_device(identifiers=...) is deprecated in newer releases; scanning
-    the registry works the same on all of them.
+    Newer releases deprecate both async_get_device(identifiers=...) and reading
+    the registry as a mapping; this helper exists in all of them.
     """
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
     return next(
         (
             device
-            for device in dr.async_get(hass).devices.values()
+            for device in dr.async_entries_for_config_entry(
+                dr.async_get(hass), entry.entry_id
+            )
             if (DOMAIN, code) in device.identifiers
         ),
         None,
