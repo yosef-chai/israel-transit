@@ -22,8 +22,6 @@ get_arrivals:
 
 refresh_stop:
   target:
-    device:
-      integration: israel_transit
     entity:
       integration: israel_transit
 

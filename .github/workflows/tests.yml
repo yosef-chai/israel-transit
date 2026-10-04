@@ -21,7 +21,9 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-      - run: pip install ruff mypy pytest pytest-asyncio aiohttp voluptuous pytest-homeassistant-custom-component
+      # Typed against the minimum version: from 2026.9 core annotates schemas
+      # with probatio, which 2026.7 doesn't have, so it can't be imported here.
+      - run: pip install ruff mypy pytest-homeassistant-custom-component==0.13.344
       - run: ruff check custom_components tests
       - run: ruff format --check custom_components tests
       - run: mypy
@@ -36,7 +38,7 @@ jobs:
           python-version: "3.14"
           cache: pip
       - run: pip install pytest pytest-asyncio aiohttp voluptuous
-      - run: pytest -q
+      - run: python -m pytest -q
 
   homeassistant:
     name: ${{ matrix.name }}
@@ -57,7 +59,8 @@ jobs:
           python-version: "3.14"
           cache: pip
       - run: pip install "${{ matrix.harness }}"
-      - run: pytest -c pytest-ha.ini -q --cov=custom_components.israel_transit --cov-report=term-missing
+      # python -m puts the repository on sys.path, where -p finds win_posix_shim
+      - run: python -m pytest -c pytest-ha.ini -q --cov=custom_components.israel_transit --cov-report=term-missing
 
   card:
     name: Card bundle
