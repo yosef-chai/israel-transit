@@ -98,12 +98,11 @@ class GtfsIndex:
 
     async def async_load(self) -> bool:
         """Open an existing index, if there is one and it is still readable."""
-        if not self._db_path.exists():
-            return False
         try:
-            self._connection = await self._hass.async_add_executor_job(
-                connect, self._db_path
-            )
+            connection = await self._hass.async_add_executor_job(self._open_existing)
+            if connection is None:
+                return False
+            self._connection = connection
             current = await self._hass.async_add_executor_job(
                 self._locked, schema_is_current, self._connection
             )
@@ -129,6 +128,12 @@ class GtfsIndex:
         if self._connection is not None:
             connection, self._connection = self._connection, None
             await self._hass.async_add_executor_job(self._locked, connection.close)
+
+    def _open_existing(self) -> sqlite3.Connection | None:
+        """פותח את האינדקס אם הקובץ קיים. גם הבדיקה חוסמת, ולכן רק מתוך ה-executor."""
+        if not self._db_path.exists():
+            return None
+        return connect(self._db_path)
 
     def _locked(self, func: Callable[..., _T], *args: Any) -> _T:
         """מריץ פעולה על החיבור כשהוא לא בשימוש. חוסם, ולכן רק מתוך ה-executor."""

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -75,6 +76,28 @@ async def test_a_missing_index_is_not_an_error(hass: HomeAssistant) -> None:
 
     assert await index.async_load() is False
     assert index.available is False
+
+
+@pytest.mark.parametrize("present", [True, False])
+async def test_loading_never_touches_the_disk_on_the_event_loop(
+    built_index: GtfsIndex, present: bool
+) -> None:
+    """בדיקת קיום הקובץ חוסמת על אחסון איטי, כמו כל גישה אחרת לדיסק."""
+    if not present:
+        built_index.db_path.unlink()
+    loop_thread = threading.current_thread()
+    used: list[threading.Thread] = []
+    real_exists = Path.exists
+
+    def spy(self: Path, *args: object, **kwargs: object) -> bool:
+        used.append(threading.current_thread())
+        return real_exists(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(Path, "exists", spy):
+        assert await built_index.async_load() is present
+
+    assert used, "the index file was never checked"
+    assert all(thread is not loop_thread for thread in used)
 
 
 async def test_queries_before_the_index_exists_are_refused(
