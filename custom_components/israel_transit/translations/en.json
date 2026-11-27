@@ -19,8 +19,9 @@
       "step": {
         "user": {
           "title": "Find a stop",
-          "description": "Search by stop name, city and street, or by the code printed on the stop sign. Words combine, so \"Kfar Saba Weizmann\" narrows to that street.",
+          "description": "Pick one of the stops nearest your home, when your home location is set, or search by stop name, city and street, or by the code printed on the stop sign. Words combine, so \"Kfar Saba Weizmann\" narrows to that street. A search takes priority over a stop picked from the list.",
           "data": {
+            "nearby": "Stops near your home",
             "query": "Search"
           }
         },
@@ -36,10 +37,12 @@
           "data": {
             "lines": "Tracked lines",
             "scan_interval": "Update interval",
+            "walk_minutes": "Walking time to the stop",
             "rail_destination": "Train destination"
           },
           "data_description": {
-            "scan_interval": "How often to refresh. Real-time data comes from a free community service, so please keep this at 60 seconds or more.",
+            "scan_interval": "How often to refresh. Real-time data comes from a free community service, so please keep this at 60 seconds or more. When nothing is due for a while, at night or on Shabbat, it refreshes less often by itself.",
+            "walk_minutes": "Minutes from your door to the stop. Adds a \"Leave by\" sensor and lets the \"Time to leave\" trigger and the card tell you when to head out. 0 turns it off.",
             "rail_destination": "Only for railway stations. Israel Railways reports departure delays per route, so a destination is needed to show live train times instead of the timetable."
           }
         },
@@ -49,17 +52,20 @@
           "data": {
             "lines": "Tracked lines",
             "scan_interval": "Update interval",
+            "walk_minutes": "Walking time to the stop",
             "rail_destination": "Train destination"
           },
           "data_description": {
-            "scan_interval": "How often to refresh. Real-time data comes from a free community service, so please keep this at 60 seconds or more.",
+            "scan_interval": "How often to refresh. Real-time data comes from a free community service, so please keep this at 60 seconds or more. When nothing is due for a while, at night or on Shabbat, it refreshes less often by itself.",
+            "walk_minutes": "Minutes from your door to the stop. Adds a \"Leave by\" sensor and lets the \"Time to leave\" trigger and the card tell you when to head out. 0 turns it off.",
             "rail_destination": "Only for railway stations. Israel Railways reports departure delays per route, so a destination is needed to show live train times instead of the timetable."
           }
         }
       },
       "error": {
         "cannot_connect": "Could not read the local timetable. Try again, and if it keeps failing, rebuild it with the Rebuild timetable action.",
-        "no_stops_found": "No stop matched that search. Try fewer words, or the code printed on the stop sign."
+        "no_stops_found": "No stop matched that search. Try fewer words, or the code printed on the stop sign.",
+        "choose_or_search": "Pick a stop from the list, or type something to search for."
       },
       "abort": {
         "already_configured": "This stop is already set up.",
@@ -99,6 +105,9 @@
           },
           "train_number": {
             "name": "Train number"
+          },
+          "next_service": {
+            "name": "Next service"
           }
         }
       },
@@ -107,25 +116,92 @@
       },
       "line_next_arrival": {
         "name": "Line {line} next arrival"
+      },
+      "leave_by": {
+        "name": "Leave by",
+        "state_attributes": {
+          "line": {
+            "name": "Line"
+          },
+          "destination": {
+            "name": "Destination"
+          },
+          "arrival": {
+            "name": "Arrival"
+          },
+          "is_realtime": {
+            "name": "Real-time"
+          },
+          "walk_minutes": {
+            "name": "Walking time"
+          }
+        }
+      },
+      "line_leave_by": {
+        "name": "Line {line} leave by"
       }
     }
   },
   "services": {
     "get_arrivals": {
       "name": "Get arrivals",
-      "description": "Returns the upcoming arrivals at a stop, for use in scripts, templates and automations.",
+      "description": "Returns the upcoming arrivals at a stop: each line with its destination, the minutes until it arrives, whether the time is live or from the timetable, its delay in minutes, and cancellations. The response also carries a ready-to-read summary sentence, how many minutes are left to leave home when the stop has a walking time, and, when nothing is due at night or on Shabbat, when service resumes.",
+      "fields": {
+        "stop_code": {
+          "name": "Stop code",
+          "description": "The Ministry of Transport stop code printed on the stop sign, for example 21023."
+        },
+        "lines": {
+          "name": "Lines",
+          "description": "Only these line numbers, for example 18 or 480. Leave empty for every line at the stop."
+        },
+        "rail_destination": {
+          "name": "Train destination",
+          "description": "Israel Railways destination station ID, for example 3700 for Tel Aviv Savidor Center. Gives live train departures and delays instead of the timetable."
+        }
+      }
+    },
+    "notify_arrival": {
+      "name": "Notify me when it's close",
+      "description": "Sends one notification to a phone when the next vehicle of a line is a few minutes, or a few stops, away from a stop. Vehicles already that close when you set it are skipped. Without a target it goes to the Home Assistant app on the phones of the user who set it. Lasts up to two hours and does not survive a restart.",
       "fields": {
         "stop_code": {
           "name": "Stop code",
           "description": "The Ministry of Transport stop code printed on the stop sign."
         },
-        "lines": {
-          "name": "Lines",
-          "description": "Only return these line numbers. Leave empty for all lines."
+        "line": {
+          "name": "Line",
+          "description": "The line number to watch, for example 18."
         },
-        "rail_destination": {
-          "name": "Train destination",
-          "description": "Israel Railways destination station ID, for live train departures."
+        "minutes": {
+          "name": "Minutes before",
+          "description": "Notify when the vehicle is due within this many minutes. Defaults to 5, or to 1 when a number of stops is set."
+        },
+        "stops": {
+          "name": "Stops before",
+          "description": "Notify when the vehicle is this many stops away. Needs the vehicle's live position; without one, the minutes apply."
+        },
+        "notify_entity_id": {
+          "name": "Send to",
+          "description": "Notify entities to send to. Leave empty for your own phones in the Home Assistant app."
+        }
+      }
+    },
+    "cancel_arrival_alert": {
+      "name": "Cancel arrival notification",
+      "description": "Cancels a notification set with \"Notify me when it's close\" for the same stop, line and recipients. Cancelling one that already went off does nothing.",
+      "fields": {
+        "stop_code": {
+          "name": "Stop code",
+          "description": "The Ministry of Transport stop code printed on the stop sign."
+        },
+        "line": {
+          "name": "Line",
+          "description": "The line number the notification was set for."
+        },
+        "notify_entity_id": {
+          "name": "Send to",
+          "description": "The same recipients the notification was set with. Leave empty for your own phones."
         }
       }
     },
@@ -179,6 +255,12 @@
     },
     "rebuild_failed": {
       "message": "Rebuilding the timetable failed. Check the network connection and free disk space, then try again. {error}"
+    },
+    "unknown_line": {
+      "message": "Line {line} does not stop at stop {stop_code}. Check the line number."
+    },
+    "no_notify_target": {
+      "message": "There is no phone to send to. Install the Home Assistant app and sign in with this user, or choose who to send to."
     }
   },
   "issues": {
@@ -235,6 +317,20 @@
         "offset_type": {
           "name": "Before or after",
           "description": "Whether the offset is before the arrival or after it."
+        }
+      }
+    },
+    "leave": {
+      "name": "Time to leave for the stop",
+      "description": "Triggers when it is time to leave home to catch a vehicle: its arrival minus the stop's walking time, or a set time before that. Follows the live time and fires once per trip. With no walking time set, it fires at the arrival.",
+      "fields": {
+        "line": {
+          "name": "Line",
+          "description": "Only this line number. Leave empty for every line at the stop."
+        },
+        "offset": {
+          "name": "Heads-up",
+          "description": "How long before the time to leave to trigger. Zero triggers at the moment to leave."
         }
       }
     },

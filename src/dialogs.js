@@ -20,9 +20,12 @@ import {
   DIALOG_CLOSED,
   DOMAIN,
   MY_STOP_COLORS,
+  OPEN_ARRIVAL,
+  VEHICLE_PICKED,
   errorMessage,
   formatClock,
   isDark,
+  minutesUntil,
   modeColor,
   modeLabel,
   modeMapColor,
@@ -39,6 +42,11 @@ const ROUTE_CACHE_SIZE = 40;
 
 const routeCache = new Map();
 let cachedIndex = null;
+
+// ההתראות שנקבעו מהדף הזה, לפי "תחנה|קו", כדי שפתיחה חוזרת של הקו תראה אותן.
+const activeAlerts = new Map();
+// כמו בשרת: התראה שלא ירתה פגה אחרי שעתיים.
+const ALERT_MAX_MS = 2 * 3600 * 1000;
 
 const cacheGet = (key) => {
   const hit = routeCache.get(key);
@@ -176,6 +184,89 @@ const dialogStyles = css`
 
   .approx {
     margin-block-end: var(--ha-space-3, 12px);
+  }
+
+  /* -- the phone alert, under the status -- */
+
+  .alert-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ha-space-2, 8px);
+    margin-block-end: var(--ha-space-3, 12px);
+    color: var(--secondary-text-color);
+  }
+
+  .alert-row .icon.on {
+    color: var(--primary-color);
+  }
+
+  .alert-text {
+    flex: 1 1 auto;
+    font-size: var(--ha-font-size-s, 12px);
+  }
+
+  .alert-row + .alert {
+    margin-block-end: var(--ha-space-3, 12px);
+  }
+
+  /* An assist chip, like the ones Home Assistant draws in its own dialogs. */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding-inline: var(--ha-space-3, 12px);
+    border: var(--ha-border-width-sm, 1px) solid var(--outline-color, var(--divider-color));
+    border-radius: var(--ha-border-radius-md, 8px);
+    background: none;
+    color: var(--primary-text-color);
+    font: inherit;
+    font-size: var(--ha-font-size-s, 12px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    cursor: pointer;
+  }
+
+  .chip:hover:not(:disabled) {
+    background: var(--ha-color-fill-neutral-quiet-hover, rgba(127, 127, 127, 0.08));
+  }
+
+  .chip:disabled {
+    cursor: default;
+    opacity: 0.6;
+  }
+
+  .chip:focus-visible,
+  .item.pick:focus-visible {
+    outline: 2px solid var(--ha-color-focus, var(--primary-color));
+    outline-offset: 2px;
+  }
+
+  /* -- the overview: every vehicle on its way -- */
+
+  .item.pick {
+    width: 100%;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+
+  .list > div + div > .item {
+    box-shadow: inset 0 1px 0 var(--divider-color, rgba(127, 127, 127, 0.2));
+  }
+
+  .item.pick:hover {
+    background: var(--ha-color-fill-neutral-quiet-hover, rgba(127, 127, 127, 0.08));
+  }
+
+  .item-eta {
+    flex: 0 0 auto;
+    font-size: var(--ha-font-size-m, 14px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    color: var(--primary-text-color);
+    font-variant-numeric: tabular-nums;
   }
 
   /* -- the stop timeline -- */
@@ -358,6 +449,26 @@ class DialogBase extends LitElement {
     this.dispatchEvent(new CustomEvent(DIALOG_CLOSED));
   }
 
+  /** The map's own strings, in the user's language. */
+  _mapStrings(recenterKey = "recenter") {
+    const t = (key) => this._t(key);
+    return {
+      unavailable: t("mapUnavailable"),
+      unsupported: t("mapUnsupported"),
+      failed: t("mapFailed"),
+      vendor: t("mapVendor"),
+      retry: t("retry"),
+      reload: t("reload"),
+      recenter: t(recenterKey),
+      maplibre: {
+        "NavigationControl.ZoomIn": t("zoomIn"),
+        "NavigationControl.ZoomOut": t("zoomOut"),
+        "AttributionControl.ToggleAttribution": t("attribution"),
+        "Map.Title": t("mapLabel"),
+      },
+    };
+  }
+
   _renderDialog(heading, subheading, body) {
     return html`<israel-transit-dialog
       .heading=${heading}
@@ -472,8 +583,12 @@ export class IsraelTransitRouteDialog extends DialogBase {
     showMap: { attribute: false },
     stopCode: { attribute: false },
     clockOffset: { attribute: false },
+    // ההתראה לטלפון: { minutes, stops, notify } מהגדרות הכרטיס.
+    alert: { attribute: false },
     _route: { state: true },
     _now: { state: true },
+    _alertBusy: { state: true },
+    _alertError: { state: true },
   };
 
   constructor() {
@@ -624,25 +739,6 @@ export class IsraelTransitRouteDialog extends DialogBase {
     return { view, here, mine, passed, age, stale, dashed, vehicle };
   }
 
-  _strings() {
-    const t = (key) => this._t(key);
-    return {
-      unavailable: t("mapUnavailable"),
-      unsupported: t("mapUnsupported"),
-      failed: t("mapFailed"),
-      vendor: t("mapVendor"),
-      retry: t("retry"),
-      reload: t("reload"),
-      recenter: t("recenter"),
-      maplibre: {
-        "NavigationControl.ZoomIn": t("zoomIn"),
-        "NavigationControl.ZoomOut": t("zoomOut"),
-        "AttributionControl.ToggleAttribution": t("attribution"),
-        "Map.Title": t("mapLabel"),
-      },
-    };
-  }
-
   /** Minutes into the run, for when no vehicle departure time is known. */
   _relative(seconds) {
     if (seconds == null) return "";
@@ -672,10 +768,11 @@ export class IsraelTransitRouteDialog extends DialogBase {
           ${showMap
             ? html`<israel-transit-map
                 .view=${picture.view}
-                .strings=${this._strings()}
+                .strings=${this._mapStrings()}
               ></israel-transit-map>`
             : nothing}
           ${stops.length ? this._renderStatus(arrival, stops, picture) : nothing}
+          ${this._renderAlert(arrival, picture.vehicle)}
           ${showMap && picture.dashed && stops.length > 1
             ? html`<div class="alert info approx" role="note">
                 ${icon(ICONS.map, { size: 18 })}<span>${this._t("approximateRoute")}</span>
@@ -736,6 +833,98 @@ export class IsraelTransitRouteDialog extends DialogBase {
     </div>`;
   }
 
+  get _alertKey() {
+    return `${this.stopCode}|${this.arrival?.line_name}`;
+  }
+
+  /**
+   * "התראה לטלפון: 5 דק׳ לפני · 2 תחנות לפני". התחנות רק כשהרכב משדר מיקום,
+   * כי בלעדיו אין איך לספור אותן.
+   */
+  _renderAlert(arrival, vehicle) {
+    if (arrival.cancelled || !arrival.line_name || this.stopCode == null) return nothing;
+    const { minutes = 5, stops = 2 } = this.alert || {};
+    const active = activeAlerts.get(this._alertKey);
+    const set = active && active.until > Date.now() ? active : null;
+    const error = this._alertError
+      ? html`<div class="alert error" role="alert">
+          ${icon(ICONS.alert, { size: 18 })}<span>${this._alertError}</span>
+        </div>`
+      : nothing;
+    if (set) {
+      const key = set.kind === "stops" ? "alertSetStops" : "alertSetMinutes";
+      return html`<div class="alert-row" role="status">
+          ${icon(ICONS.bellSet, { size: 20, cls: "icon on" })}
+          <span class="alert-text">${this._t(key, { line: arrival.line_name, n: set.n })}</span>
+          <button class="chip" ?disabled=${this._alertBusy} @click=${this._cancelAlert}>
+            ${this._t("alertCancel")}
+          </button>
+        </div>
+        ${error}`;
+    }
+    return html`<div class="alert-row" role="group" aria-label=${this._t("alertTitle")}>
+        ${icon(ICONS.bell, { size: 20 })}
+        <span class="alert-text">${this._t("alertTitle")}</span>
+        <button
+          class="chip"
+          ?disabled=${this._alertBusy}
+          @click=${() => this._setAlert("minutes", minutes)}
+        >
+          ${this._t("alertMinutes", { n: minutes })}
+        </button>
+        ${vehicle
+          ? html`<button
+              class="chip"
+              ?disabled=${this._alertBusy}
+              @click=${() => this._setAlert("stops", stops)}
+            >
+              ${this._t("alertStops", { n: stops })}
+            </button>`
+          : nothing}
+      </div>
+      ${error}`;
+  }
+
+  async _callAlert(service, extra = {}) {
+    const data = {
+      stop_code: Number(this.stopCode),
+      line: String(this.arrival.line_name),
+      ...extra,
+    };
+    if (this.alert?.notify) data.notify_entity_id = [this.alert.notify];
+    this._alertBusy = true;
+    this._alertError = null;
+    try {
+      // בלי ההודעה הקופצת של Home Assistant: השגיאה מוצגת כאן, ליד הכפתור.
+      await this.hass.callService(DOMAIN, service, data, undefined, false);
+      return true;
+    } catch (err) {
+      this._alertError = err?.message || this._t("alertFailed");
+      return false;
+    } finally {
+      this._alertBusy = false;
+    }
+  }
+
+  async _setAlert(kind, n) {
+    const key = this._alertKey;
+    if (!(await this._callAlert("notify_arrival", { [kind]: n }))) return;
+    // ponytail: הכרטיס לא שומע כשההתראה יורה, ולכן הסימון פג דקה אחרי הרכב הזה,
+    // ולכל היותר אחרי שעתיים. אם זה מבלבל: להאזין לאירוע israel_transit_arrival_alert.
+    const eta = Date.parse(this.arrival.eta) || Date.now();
+    const until = Math.min(Date.now() + ALERT_MAX_MS, Math.max(eta, Date.now()) + 60000);
+    activeAlerts.set(key, { kind, n, until });
+    this.requestUpdate();
+  }
+
+  async _cancelAlert() {
+    const key = this._alertKey;
+    if (await this._callAlert("cancel_arrival_alert")) {
+      activeAlerts.delete(key);
+      this.requestUpdate();
+    }
+  }
+
   _renderTimeline(stops, { here, mine, passed }, showMap) {
     return html`<ol class="timeline" aria-label=${this._t("routeStops")}>
       ${stops.map((stop, index) => {
@@ -777,5 +966,147 @@ export class IsraelTransitRouteDialog extends DialogBase {
         </li>`;
       })}
     </ol>`;
+  }
+}
+
+/**
+ * מבט על: כל הרכבים שבדרך לתחנה על מפה אחת, ומתחתיה הרשימה לפי זמן ההגעה, כדי
+ * לראות במבט אחד איזה קו קרוב יותר בפועל. בחירה ברכב פותחת את פרטי הקו שלו.
+ */
+export class IsraelTransitOverviewDialog extends DialogBase {
+  static properties = {
+    ...DialogBase.properties,
+    stop: { attribute: false },
+    arrivals: { attribute: false },
+    clockOffset: { attribute: false },
+    _now: { state: true },
+  };
+
+  constructor() {
+    super();
+    this.arrivals = [];
+    this.clockOffset = 0;
+    this._now = Date.now();
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this._ageTimer = setInterval(() => (this._now = Date.now()), AGE_TICK_MS);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearInterval(this._ageTimer);
+  }
+
+  _id(arrival, index) {
+    return arrival.vehicle_ref ? `v:${arrival.vehicle_ref}` : `i:${index}`;
+  }
+
+  /** הנסיעות שבדרך, ולכל אחת מזהה; רכב שמופיע פעמיים נספר פעם אחת, בקרובה. */
+  get _rows() {
+    const seen = new Set();
+    return (this.arrivals || [])
+      .map((arrival, index) => ({ arrival, id: this._id(arrival, index) }))
+      .filter(({ id }) => !seen.has(id) && seen.add(id));
+  }
+
+  _when(arrival) {
+    const minutes = minutesUntil(arrival.eta, this._now);
+    if (minutes === null) return "";
+    if (minutes > 59) return formatClock(arrival.eta, this.hass);
+    return minutes === 0 ? this._t("now") : this._t("inMinutes", { n: minutes });
+  }
+
+  _view(rows) {
+    const dark = isDark(this.hass);
+    const mine = stopPoint(this.stop);
+    const vehicles = rows
+      .map(({ arrival, id }) => {
+        const point = [Number(arrival.vehicle_lat), Number(arrival.vehicle_lon)];
+        if (arrival.vehicle_lat == null || !isPoint(point)) return null;
+        const age = positionAge(arrival.vehicle_seen, this.clockOffset ?? 0, this._now);
+        return {
+          id,
+          point,
+          icon: modePath(arrival.route_type),
+          lineName: arrival.line_name,
+          color: modeMapColor(arrival.route_type, dark),
+          stale: age != null && age > STALE_POSITION_S,
+          label: this._t("overviewVehicle", { line: arrival.line_name, when: this._when(arrival) }),
+        };
+      })
+      .filter(Boolean);
+    return {
+      dark,
+      dashed: false,
+      mineColor: MY_STOP_COLORS[dark ? 1 : 0],
+      line: [],
+      done: [],
+      ahead: [],
+      stops: [],
+      mine: isPoint(mine)
+        ? { point: mine, name: this.stop.name, label: `${this._t("myStop")}: ${this.stop.name}` }
+        : null,
+      vehicles,
+      bounds: boundsOf([mine, ...vehicles.map((vehicle) => vehicle.point)]),
+      // מתמקדים מחדש כשרכב נוסף או יורד, לא בכל תזוזה שלו.
+      fitKey: vehicles.map((vehicle) => vehicle.id).sort().join(","),
+      subject: "overview",
+    };
+  }
+
+  _pick(id) {
+    const row = this._rows.find((candidate) => candidate.id === id);
+    if (row) this.dispatchEvent(new CustomEvent(OPEN_ARRIVAL, { detail: { arrival: row.arrival } }));
+  }
+
+  render() {
+    const rows = this._rows;
+    const view = this._view(rows);
+    const stop = this.stop || {};
+    return this._renderDialog(
+      this._t("overviewTitle"),
+      [stop.name, stop.code].filter(Boolean).join(" · "),
+      html`
+        <israel-transit-map
+          .view=${view}
+          .strings=${this._mapStrings("overviewRecenter")}
+          @israel-transit-vehicle-picked=${(ev) => this._pick(ev.detail.id)}
+        ></israel-transit-map>
+        ${view.vehicles.length
+          ? nothing
+          : html`<div class="alert info approx" role="note">
+              ${icon(ICONS.noPosition, { size: 18 })}<span>${this._t("overviewEmpty")}</span>
+            </div>`}
+        ${rows.length
+          ? html`<div class="list" role="list">
+              ${rows.map(
+                ({ arrival, id }) => html`<div role="listitem">
+                  <button class="item pick" @click=${() => this._pick(id)}>
+                    <div class="badge" style=${`--it-badge-color:${modeColor(arrival.route_type)}`}>
+                      ${arrival.line_name}
+                    </div>
+                    <div class="item-body">
+                      <div class="item-title">${arrival.destination || arrival.line_name}</div>
+                      <div class="item-sub">
+                        ${arrival.vehicle_lat != null
+                          ? arrival.is_realtime
+                            ? this._t("live")
+                            : this._t("scheduled")
+                          : this._t("noPositionShort")}
+                      </div>
+                    </div>
+                    <div class="item-eta">${this._when(arrival)}</div>
+                  </button>
+                </div>`,
+              )}
+            </div>`
+          : html`<div class="empty">
+              ${icon(ICONS.empty, { size: 40 })}
+              <p class="empty-title">${this._t("noArrivals")}</p>
+            </div>`}
+      `,
+    );
   }
 }

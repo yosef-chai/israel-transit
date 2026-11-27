@@ -1174,6 +1174,17 @@ def departures_at(
     into a Python list only to send them back as bind parameters is slower than
     letting SQLite join them.
     """
+    return _departures(connection, stop_code, (start, end), max_sec, _DEPARTURES_SQL)
+
+
+def _departures(
+    connection: sqlite3.Connection,
+    stop_code: int,
+    window: tuple[datetime, datetime],
+    max_sec: int | None,
+    sql: str,
+) -> list[ScheduledRow]:
+    start, end = window
     limit = _DEFAULT_MAX_SEC if max_sec is None else max_sec
     first = start.astimezone(ISRAEL_TZ).date() - timedelta(days=1)
     days = (end.astimezone(ISRAEL_TZ).date() - first).days + 1
@@ -1187,7 +1198,7 @@ def departures_at(
             continue
         stamp = int(day.strftime("%Y%m%d"))
         rows = connection.execute(
-            _DEPARTURES_SQL,
+            sql,
             {
                 "stop": stop_code,
                 "low": low,
@@ -1303,6 +1314,18 @@ def search_stops(
     return [_stop_of(row) for row in rows]
 
 
+def stops_in_box(
+    connection: sqlite3.Connection, lat: float, lon: float, half: float
+) -> list[Stop]:
+    """התחנות בריבוע של ``half`` מעלות סביב נקודה. המיון לפי מרחק נעשה אצל הקורא."""
+    rows = connection.execute(
+        "SELECT code, name, city, lat, lon, street FROM stops "
+        "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+        (lat - half, lat + half, lon - half, lon + half),
+    ).fetchall()
+    return [_stop_of(row) for row in rows]
+
+
 def routes_at_stop(connection: sqlite3.Connection, code: int) -> list[RouteInfo]:
     """כל הקווים בתחנה. אינדקס מסכמה ישנה, בלי stop_routes, נשען על הדפוסים."""
     source = "stop_routes" if has_table(connection, "stop_routes") else "patterns"
@@ -1363,23 +1386,39 @@ def scheduled_arrivals(
     max_sec: int | None = None,
 ) -> list[Arrival]:
     """Timetabled arrivals as the card and the entities consume them."""
-    arrivals = []
-    for item in departures_at(connection, code, start, end, max_sec):
-        row = item.row
-        route = route_of(row)
-        arrivals.append(
-            Arrival(
-                line_name=route.short_name or route.line_ref,
-                eta=item.when,
-                is_realtime=False,
-                destination=route.destination,
-                operator=route.agency,
-                line_ref=route.line_ref,
-                route_type=route.route_type,
-                scheduled=item.when,
-                origin=item.origin,
-                operator_id=row["agency_id"] or None,
-                dest_code=row["dest_code"],
-            )
-        )
-    return arrivals
+    return [
+        _scheduled_arrival(item)
+        for item in departures_at(connection, code, start, end, max_sec)
+    ]
+
+
+def next_scheduled(
+    connection: sqlite3.Connection,
+    code: int,
+    start: datetime,
+    end: datetime,
+    max_sec: int | None = None,
+) -> Arrival | None:
+    """הנסיעה המתוכננת הראשונה בחלון, בשאילתה של שורה אחת לכל יום שירות."""
+    rows = _departures(
+        connection, code, (start, end), max_sec, f"{_DEPARTURES_SQL} LIMIT 1"
+    )
+    return _scheduled_arrival(rows[0]) if rows else None
+
+
+def _scheduled_arrival(item: ScheduledRow) -> Arrival:
+    row = item.row
+    route = route_of(row)
+    return Arrival(
+        line_name=route.short_name or route.line_ref,
+        eta=item.when,
+        is_realtime=False,
+        destination=route.destination,
+        operator=route.agency,
+        line_ref=route.line_ref,
+        route_type=route.route_type,
+        scheduled=item.when,
+        origin=item.origin,
+        operator_id=row["agency_id"] or None,
+        dest_code=row["dest_code"],
+    )

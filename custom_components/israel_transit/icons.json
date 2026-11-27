@@ -9,6 +9,12 @@
       },
       "line_next_arrival": {
         "default": "mdi:bus-clock"
+      },
+      "leave_by": {
+        "default": "mdi:walk"
+      },
+      "line_leave_by": {
+        "default": "mdi:walk"
       }
     }
   },
@@ -24,11 +30,20 @@
     },
     "rebuild_timetable": {
       "service": "mdi:database-refresh"
+    },
+    "notify_arrival": {
+      "service": "mdi:bell-ring-outline"
+    },
+    "cancel_arrival_alert": {
+      "service": "mdi:bell-off-outline"
     }
   },
   "triggers": {
     "arrival": {
       "trigger": "mdi:bus-clock"
+    },
+    "leave": {
+      "trigger": "mdi:walk"
     },
     "delay": {
       "trigger": "mdi:clock-alert-outline"

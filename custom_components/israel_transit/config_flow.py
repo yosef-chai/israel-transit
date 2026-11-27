@@ -33,16 +33,20 @@ from homeassistant.helpers import selector
 from .api import IsraelTransitError, Stop
 from .const import (
     CONF_LINES,
+    CONF_NEARBY,
     CONF_QUERY,
     CONF_RAIL_DESTINATION,
     CONF_SCAN_INTERVAL,
     CONF_STOP_CODE,
     CONF_STOP_NAME,
+    CONF_WALK_MINUTES,
     DATA_CLIENTS,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     INTEGRATION_TITLE,
+    MAX_WALK_MINUTES,
     MIN_SCAN_INTERVAL,
+    NEARBY_STOPS,
     SUBENTRY_TYPE_STOP,
 )
 from .coordinator import Clients
@@ -52,7 +56,9 @@ from .rail_stations import RAIL_STATIONS
 _LOGGER = logging.getLogger(__name__)
 
 # What the settings form edits. Anything else in a stop's data is its identity.
-_SETTINGS_KEYS = frozenset({CONF_LINES, CONF_SCAN_INTERVAL, CONF_RAIL_DESTINATION})
+_SETTINGS_KEYS = frozenset(
+    {CONF_LINES, CONF_SCAN_INTERVAL, CONF_RAIL_DESTINATION, CONF_WALK_MINUTES}
+)
 
 
 def _stop_title(stop: Stop) -> str:
@@ -65,6 +71,14 @@ def _stop_option(stop: Stop) -> str:
     """The same, plus the street: one city can hold several stops of a name."""
     parts = [stop.name, stop.street, stop.city]
     return f"{' · '.join(part for part in parts if part)} ({stop.code})"
+
+
+def _distance(metres: float, lang: str) -> str:
+    """'350 מ׳' או '1.2 ק״מ'. התוויות של בורר נכתבות כפי שהן, בלי תרגום של HA."""
+    he = lang.lower().startswith("he")
+    if metres < 1000:
+        return f"{round(metres / 10) * 10:.0f} {'מ׳' if he else 'm'}"
+    return f"{metres / 1000:.1f} {'ק״מ' if he else 'km'}"
 
 
 def _rail_options() -> list[selector.SelectOptionDict]:
@@ -116,6 +130,7 @@ class StopSubentryFlowHandler(ConfigSubentryFlow):
 
     def __init__(self) -> None:
         self._matches: list[Stop] = []
+        self._nearby: list[tuple[Stop, float]] | None = None
         self._stop: Stop | None = None
         self._waiting = False
         self._built = False
@@ -180,32 +195,74 @@ class StopSubentryFlowHandler(ConfigSubentryFlow):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Search for a stop by name, city, street or code."""
+        """The stops nearest home, or a search by name, city, street or code.
+
+        מה שהוקלד בחיפוש גובר על בחירה ברשימה: הקלדה היא פעולה מפורשת, ובחירה
+        ברשימה אי אפשר לבטל.
+        """
         if (waiting := self._async_index_step("user")) is not None:
             return waiting
+        nearby = await self._async_nearby()
 
         errors: dict[str, str] = {}
         if user_input is not None:
+            query = str(user_input.get(CONF_QUERY) or "").strip()
+            picked = user_input.get(CONF_NEARBY)
+            if query:
+                try:
+                    self._matches = await self._index().async_search(query, limit=25)
+                except IsraelTransitError as err:
+                    _LOGGER.warning("Stop search failed: %s", err)
+                    errors["base"] = "cannot_connect"
+                else:
+                    if not self._matches:
+                        errors[CONF_QUERY] = "no_stops_found"
+                    elif len(self._matches) == 1:
+                        return await self._async_chosen(self._matches[0])
+                    else:
+                        return await self.async_step_pick_stop()
+            elif chosen := next(
+                (stop for stop, _ in nearby if str(stop.code) == picked), None
+            ):
+                return await self._async_chosen(chosen)
+            else:
+                errors["base"] = "choose_or_search"
+
+        schema: dict[Any, Any] = {}
+        if nearby:
+            lang = self.hass.config.language
+            schema[vol.Optional(CONF_NEARBY)] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(
+                            value=str(stop.code),
+                            label=f"{_stop_option(stop)} · {_distance(metres, lang)}",
+                        )
+                        for stop, metres in nearby
+                    ],
+                    mode=selector.SelectSelectorMode.LIST,
+                )
+            )
+        # בלי רשימה, החיפוש הוא הדרך היחידה ולכן חובה.
+        key = vol.Optional(CONF_QUERY) if nearby else vol.Required(CONF_QUERY)
+        schema[key] = selector.TextSelector()
+        return self.async_show_form(
+            step_id="user", data_schema=vol.Schema(schema), errors=errors
+        )
+
+    async def _async_nearby(self) -> list[tuple[Stop, float]]:
+        """התחנות הקרובות למיקום הבית, פעם אחת לכל זרימה."""
+        if self._nearby is None:
             try:
-                self._matches = await self._index().async_search(
-                    user_input[CONF_QUERY].strip(), limit=25
+                self._nearby = await self._index().async_nearest_stops(
+                    self.hass.config.latitude,
+                    self.hass.config.longitude,
+                    NEARBY_STOPS,
                 )
             except IsraelTransitError as err:
-                _LOGGER.warning("Stop search failed: %s", err)
-                errors["base"] = "cannot_connect"
-            else:
-                if not self._matches:
-                    errors[CONF_QUERY] = "no_stops_found"
-                elif len(self._matches) == 1:
-                    return await self._async_chosen(self._matches[0])
-                else:
-                    return await self.async_step_pick_stop()
-
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_QUERY): selector.TextSelector()}),
-            errors=errors,
-        )
+                _LOGGER.debug("No stops near home: %s", err)
+                self._nearby = []
+        return self._nearby
 
     async def async_step_pick_stop(
         self, user_input: dict[str, Any] | None = None
@@ -335,6 +392,17 @@ class StopSubentryFlowHandler(ConfigSubentryFlow):
                     max=600,
                     step=10,
                     unit_of_measurement="s",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_WALK_MINUTES, default=current.get(CONF_WALK_MINUTES, 0)
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=MAX_WALK_MINUTES,
+                    step=1,
+                    unit_of_measurement="min",
                     mode=selector.NumberSelectorMode.BOX,
                 )
             ),

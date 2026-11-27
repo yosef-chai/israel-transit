@@ -6,6 +6,8 @@ import {
   mdiAlertCircleOutline,
   mdiArrowDown,
   mdiArrowUp,
+  mdiBellCheckOutline,
+  mdiBellRingOutline,
   mdiBus,
   mdiBusClock,
   mdiBusStop,
@@ -19,6 +21,7 @@ import {
   mdiInformationOutline,
   mdiMagnify,
   mdiMapMarkerAccount,
+  mdiMapMarkerMultipleOutline,
   mdiMapMarkerOffOutline,
   mdiMapOutline,
   mdiMenuDown,
@@ -27,6 +30,8 @@ import {
   mdiTimerSandEmpty,
   mdiTrain,
   mdiTram,
+  mdiWalk,
+  mdiWeatherNight,
 } from "@mdi/js";
 import { html } from "lit";
 
@@ -50,6 +55,11 @@ export const ICONS = {
   noPosition: mdiMapMarkerOffOutline,
   map: mdiMapOutline,
   empty: mdiTimerSandEmpty,
+  bell: mdiBellRingOutline,
+  bellSet: mdiBellCheckOutline,
+  walk: mdiWalk,
+  vehicles: mdiMapMarkerMultipleOutline,
+  noService: mdiWeatherNight,
 };
 
 // Matches the GTFS route types the backend reports.

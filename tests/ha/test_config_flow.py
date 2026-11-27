@@ -20,11 +20,13 @@ from homeassistant.setup import async_setup_component
 from custom_components.israel_transit.api import IsraelTransitError, RouteInfo
 from custom_components.israel_transit.const import (
     CONF_LINES,
+    CONF_NEARBY,
     CONF_QUERY,
     CONF_RAIL_DESTINATION,
     CONF_SCAN_INTERVAL,
     CONF_STOP_CODE,
     CONF_STOP_NAME,
+    CONF_WALK_MINUTES,
     DOMAIN,
     SUBENTRY_TYPE_STOP,
 )
@@ -376,3 +378,75 @@ async def test_a_stop_can_be_added_after_the_index_was_removed_with_an_entry(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "user"
     assert mock_index.async_schedule_refresh.called
+
+
+# --- stops near home --------------------------------------------------------
+
+
+def _fields(result: dict) -> list[str]:
+    return [str(key) for key in result["data_schema"].schema]
+
+
+async def test_the_stops_near_home_are_offered_and_one_tap_picks_one(
+    hass: HomeAssistant, mock_index: AsyncMock, config_entry: MockConfigEntry
+) -> None:
+    hass.config.latitude, hass.config.longitude = 32.0105, 34.7505
+    mock_index.async_nearest_stops.return_value = [(DANKAL, 120.0), (STOP, 7900.0)]
+    config_entry.add_to_hass(hass)
+
+    result = await _add_stop(hass, config_entry)
+
+    assert _fields(result) == [CONF_NEARBY, CONF_QUERY]
+    mock_index.async_nearest_stops.assert_awaited_with(32.0105, 34.7505, 8)
+    options = result["data_schema"].schema[CONF_NEARBY].config["options"]
+    assert options[0]["value"] == str(DANKAL.code)
+    assert options[0]["label"].endswith("· 120 m")
+    assert options[1]["label"].endswith("· 7.9 km")
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_NEARBY: str(DANKAL.code)}
+    )
+    assert result["step_id"] == "settings"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_WALK_MINUTES: 6}
+    )
+    assert result["data"][CONF_STOP_CODE] == DANKAL.code
+    assert result["data"][CONF_WALK_MINUTES] == 6
+
+
+async def test_a_search_beats_a_stop_picked_from_the_list(
+    hass: HomeAssistant, mock_index: AsyncMock, config_entry: MockConfigEntry
+) -> None:
+    mock_index.async_nearest_stops.return_value = [(DANKAL, 120.0)]
+    mock_index.async_search.return_value = [STOP, DANKAL]
+    config_entry.add_to_hass(hass)
+
+    result = await _add_stop(hass, config_entry)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_NEARBY: str(DANKAL.code), CONF_QUERY: "ה"}
+    )
+
+    assert result["step_id"] == "pick_stop"
+
+
+async def test_neither_a_pick_nor_a_search_asks_again(
+    hass: HomeAssistant, mock_index: AsyncMock, config_entry: MockConfigEntry
+) -> None:
+    mock_index.async_nearest_stops.return_value = [(DANKAL, 120.0)]
+    config_entry.add_to_hass(hass)
+
+    result = await _add_stop(hass, config_entry)
+    result = await hass.config_entries.subentries.async_configure(result["flow_id"], {})
+
+    assert result["errors"] == {"base": "choose_or_search"}
+
+
+async def test_far_from_any_stop_only_the_search_is_offered(
+    hass: HomeAssistant, mock_index: AsyncMock, config_entry: MockConfigEntry
+) -> None:
+    """מיקום ברירת המחדל של HA הוא באמסטרדם: אין שם תחנות, ואין רשימה."""
+    config_entry.add_to_hass(hass)
+
+    result = await _add_stop(hass, config_entry)
+
+    assert _fields(result) == [CONF_QUERY]

@@ -2,7 +2,32 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { dataAgeMinutes, errorMessage, formatDelay, minutesUntil } from "../../src/util.js";
+import {
+  dataAgeMinutes,
+  errorMessage,
+  formatDelay,
+  leaveMinutes,
+  minutesUntil,
+  whenPhrase,
+} from "../../src/util.js";
+
+test("מתי השירות חוזר, בשעון ישראל", () => {
+  const hass = { language: "he", locale: { language: "he", time_format: "24" } };
+  // שישי, 4 בספטמבר 2026, 18:00 בישראל.
+  const friday = Date.parse("2026-09-04T15:00:00Z");
+  assert.equal(whenPhrase(hass, "2026-09-05T17:15:00Z", friday), "במוצ״ש ב-20:15");
+  assert.equal(whenPhrase(hass, "2026-09-04T19:00:00Z", friday), "היום ב-22:00");
+  assert.equal(whenPhrase(hass, "2026-09-05T07:00:00Z", friday), "מחר ב-10:00");
+  assert.equal(whenPhrase(hass, "2026-09-06T03:00:00Z", friday), "ביום ראשון ב-06:00");
+  assert.equal(whenPhrase(hass, "junk", friday), "");
+});
+
+test("דקות עד היציאה: הליכה של 6 דקות", () => {
+  const now = Date.parse("2026-11-27T10:00:00Z");
+  assert.equal(leaveMinutes("2026-11-27T10:10:30Z", 6, now), 4);
+  assert.equal(leaveMinutes("2026-11-27T10:04:00Z", 6, now), -2);
+  assert.equal(leaveMinutes("2026-11-27T10:10:00Z", 0, now), null);
+});
 
 test("עיכוב: איחור עם +, הקדמה עם מינוס אמיתי, 0 נשאר 0, חוסר נשאר null", () => {
   assert.equal(formatDelay(3), "+3");

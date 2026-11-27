@@ -4,11 +4,14 @@ The next arrival is a timestamp, which the frontend already shows as "in 5
 minutes". There is no minutes-until sensor: Home Assistant's sensor docs say a
 duration "should only change when the device reports a new value, not because
 time passes". "Five minutes before line 18" is the arrival trigger's offset.
+
+תחנה עם זמן הליכה מקבלת גם "לצאת עד": חותמת זמן של הרגע שבו צריך לצאת מהבית,
+שאפשר להפעיל עליה טריגר זמן רגיל של Home Assistant, עם היסט.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -27,6 +30,7 @@ from .const import (
     ATTRIBUTION,
     CONF_LINES,
     DOMAIN,
+    LEAVE_GRACE,
     ROUTE_TYPE_ICONS,
 )
 from .coordinator import IsraelTransitConfigEntry, IsraelTransitCoordinator, StopData
@@ -44,14 +48,14 @@ async def async_setup_entry(
     """Set up each stop's sensors against the subentry that owns them."""
     registry = er.async_get(hass)
     for subentry_id, coordinator in entry.runtime_data.items():
-        entities: list[SensorEntity] = [
-            NextArrivalSensor(coordinator),
-            ArrivalCountSensor(coordinator),
+        lines: list[str | None] = [
+            None,
+            *coordinator.subentry.data.get(CONF_LINES, []),
         ]
-        entities.extend(
-            NextArrivalSensor(coordinator, line)
-            for line in coordinator.subentry.data.get(CONF_LINES, [])
-        )
+        entities: list[SensorEntity] = [ArrivalCountSensor(coordinator)]
+        entities.extend(NextArrivalSensor(coordinator, line) for line in lines)
+        if coordinator.walk_minutes:
+            entities.extend(LeaveBySensor(coordinator, line) for line in lines)
 
         _async_prune(registry, entry, subentry_id, {e.unique_id for e in entities})
         # The entities, and the device they create, belong to the stop the
@@ -153,6 +157,10 @@ class NextArrivalSensor(IsraelTransitEntity):
     def extra_state_attributes(self) -> dict[str, object]:
         arrival = self._next
         if arrival is None:
+            data: StopData | None = self.coordinator.data
+            # לילה, שבת או חג: מה שאפשר לומר הוא מתי השירות חוזר.
+            if data is not None and data.next_service and not self._line:
+                return {"next_service": data.next_service.eta}
             return {}
         return {
             "line": arrival.line_name,
@@ -164,6 +172,40 @@ class NextArrivalSensor(IsraelTransitEntity):
             "delay_minutes": arrival.delay_minutes,
             "scheduled": arrival.scheduled,
             "train_number": arrival.train_number,
+        }
+
+
+class LeaveBySensor(IsraelTransitEntity):
+    """מתי לצאת מהבית כדי להספיק את הנסיעה הבאה שעוד אפשר להגיע אליה."""
+
+    entity_suffix = "leave_by"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    @property
+    def _target(self) -> tuple[Arrival, datetime] | None:
+        walk = timedelta(minutes=self.coordinator.walk_minutes)
+        cutoff = dt_util.utcnow() - LEAVE_GRACE
+        return next(
+            ((a, a.eta - walk) for a in self._arrivals if a.eta - walk >= cutoff),
+            None,
+        )
+
+    @property
+    def native_value(self) -> datetime | None:
+        target = self._target
+        return target[1] if target else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        if (target := self._target) is None:
+            return {"walk_minutes": self.coordinator.walk_minutes}
+        arrival = target[0]
+        return {
+            "line": arrival.line_name,
+            "destination": localized(arrival.destination, self._language) or None,
+            "arrival": arrival.eta,
+            "is_realtime": arrival.is_realtime,
+            "walk_minutes": self.coordinator.walk_minutes,
         }
 
 
@@ -194,4 +236,6 @@ class ArrivalCountSensor(IsraelTransitEntity):
             "updated_at": data.updated_at,
             "arrivals": [a.as_dict(self._language, now) for a in arrivals],
             "lines": sorted({a.line_name for a in arrivals}),
+            # בלילה ובשבת: מתי חוזר השירות, לפי לוח הזמנים.
+            "next_service": data.next_service.eta if data.next_service else None,
         }

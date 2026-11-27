@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from time import monotonic
 from typing import Any
 
@@ -24,6 +25,7 @@ from .const import (
     DATA_STOP_CACHE,
     DATA_STOP_IN_FLIGHT,
     DOMAIN,
+    NEARBY_STOPS,
     STOP_CACHE_MAX_ENTRIES,
     STOP_CACHE_TTL,
 )
@@ -32,11 +34,13 @@ from .coordinator import (
     StopData,
     async_fetch_stop,
     async_find_coordinator,
+    async_walk_minutes,
+    poll_interval,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-# קוד תחנה ויעד ברכבת -> (מתי נשלף, הלוח עצמו).
+# קוד תחנה ויעד ברכבת -> (עד מתי בתוקף, הלוח עצמו).
 type _StopCache = dict[tuple[int, str | None], tuple[float, StopData]]
 
 
@@ -74,7 +78,7 @@ async def async_stop_board(
     key = (stop_code, rail_destination or None)
     now = monotonic()
     cached = cache.get(key)
-    if cached is not None and now - cached[0] < STOP_CACHE_TTL:
+    if cached is not None and now < cached[0]:
         return cached[1]
 
     # כמה כרטיסים של אותה תחנה נטענים יחד עם הדשבורד: כולם מחכים לשליפה אחת.
@@ -93,14 +97,17 @@ async def async_stop_board(
         data = await asyncio.shield(task)
     finally:
         in_flight.pop(key, None)
-    cache[key] = (now, data)
+    # אותו קצב כמו תחנה מוגדרת: בלילה ובשבת לוח ריק נשמר עד רבע שעה.
+    ttl = poll_interval(timedelta(seconds=STOP_CACHE_TTL), data, dt_util.utcnow())
+    data.refresh_seconds = int(ttl.total_seconds())
+    cache[key] = (now + ttl.total_seconds(), data)
     _prune_cache(cache, now)
     return data
 
 
 def _prune_cache(cache: _StopCache, now: float) -> None:
     """מנקה את המטמון מרשומות שפגו. בלי זה כל קוד תחנה שנשאל נשאר בזיכרון."""
-    for key in [k for k, (at, _) in cache.items() if now - at >= STOP_CACHE_TTL]:
+    for key in [k for k, (until, _) in cache.items() if now >= until]:
         del cache[key]
     if len(cache) > STOP_CACHE_MAX_ENTRIES:
         newest = sorted(cache.items(), key=lambda item: item[1][0], reverse=True)
@@ -112,6 +119,7 @@ def _prune_cache(cache: _StopCache, now: float) -> None:
 def async_register(hass: HomeAssistant) -> None:
     """Register every command this integration serves to the frontend."""
     websocket_api.async_register_command(hass, ws_search_stops)
+    websocket_api.async_register_command(hass, ws_nearby_stops)
     websocket_api.async_register_command(hass, ws_stop)
     websocket_api.async_register_command(hass, ws_stop_routes)
     websocket_api.async_register_command(hass, ws_route_stops)
@@ -137,6 +145,34 @@ async def ws_search_stops(
         connection.send_error(msg["id"], "search_failed", str(err))
         return
     connection.send_result(msg["id"], [stop.as_dict() for stop in stops])
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/nearby_stops",
+        vol.Optional("limit", default=NEARBY_STOPS): vol.All(
+            int, vol.Range(min=1, max=25)
+        ),
+    }
+)
+@websocket_api.async_response
+async def ws_nearby_stops(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """התחנות הקרובות למיקום הבית, לעורך הכרטיס, עם המרחק במטרים."""
+    try:
+        found = await _clients(hass).index.async_nearest_stops(
+            hass.config.latitude, hass.config.longitude, msg["limit"]
+        )
+    except IsraelTransitError as err:
+        connection.send_error(msg["id"], "search_failed", str(err))
+        return
+    connection.send_result(
+        msg["id"],
+        [{**stop.as_dict(), "distance": round(metres)} for stop, metres in found],
+    )
 
 
 @websocket_api.websocket_command(
@@ -179,6 +215,7 @@ async def ws_stop(
             **data.as_dict(hass.config.language),
             # שעון השרת, כדי שהכרטיס יחשב גיל של מיקום רכב בלי לסמוך על שעון הדפדפן.
             "server_time": dt_util.utcnow().isoformat(),
+            "walk_minutes": async_walk_minutes(hass, msg["stop_code"]),
         },
     )
 

@@ -202,15 +202,27 @@ async def test_every_action_trigger_and_condition_has_a_description(
         "refresh_stop",
         "search_stops",
         "rebuild_timetable",
+        "notify_arrival",
+        "cancel_arrival_alert",
     }
     assert "target" in services["refresh_stop"]
+    assert set(services["notify_arrival"]["fields"]) == {
+        "stop_code",
+        "line",
+        "minutes",
+        "stops",
+        "notify_entity_id",
+    }
 
     triggers = await trigger_helper.async_get_all_descriptions(hass)
-    assert {f"{DOMAIN}.arrival", f"{DOMAIN}.delay"} <= set(triggers)
+    assert {f"{DOMAIN}.arrival", f"{DOMAIN}.leave", f"{DOMAIN}.delay"} <= set(triggers)
     arrival = triggers[f"{DOMAIN}.arrival"]
     assert arrival is not None
     assert set(arrival["fields"]) == {"line", "offset", "offset_type"}
     assert "target" in arrival
+    leave = triggers[f"{DOMAIN}.leave"]
+    assert leave is not None
+    assert set(leave["fields"]) == {"line", "offset"}
 
     conditions = await condition_helper.async_get_all_descriptions(hass)
     arriving = conditions[f"{DOMAIN}.is_arriving_within"]

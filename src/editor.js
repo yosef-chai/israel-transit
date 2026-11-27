@@ -2,7 +2,7 @@ import { LitElement, css, html, nothing } from "lit";
 
 import { DEFAULTS } from "./card.js";
 import { ICONS, icon } from "./icons.js";
-import { localize } from "./localize.js";
+import { languageOf, localize } from "./localize.js";
 import { sharedStyles } from "./styles.js";
 import { DOMAIN, fireEvent, modeColor } from "./util.js";
 
@@ -51,6 +51,7 @@ export class IsraelTransitCardEditor extends LitElement {
     _searching: { state: true },
     _searched: { state: true },
     _picking: { state: true },
+    _nearby: { state: true },
   };
 
   constructor() {
@@ -548,6 +549,19 @@ export class IsraelTransitCardEditor extends LitElement {
     if (changed.has("hass") && !changed.get("hass") && !this._stop) {
       this._loadStop();
     }
+    // התחנות הקרובות לבית, פעם אחת, ברגע שבוחר התחנה מוצג.
+    if (this.hass && this._nearby === undefined && (!this._config?.stop_code || this._picking)) {
+      this._loadNearby();
+    }
+  }
+
+  async _loadNearby() {
+    this._nearby = null;
+    try {
+      this._nearby = await this.hass.callWS({ type: `${DOMAIN}/nearby_stops`, limit: 8 });
+    } catch {
+      this._nearby = [];
+    }
   }
 
   setConfig(config) {
@@ -749,7 +763,7 @@ export class IsraelTransitCardEditor extends LitElement {
           max=${max}
           step="1"
           aria-describedby=${helper ? `${id}-hint` : nothing}
-          .value=${String(this._value[name])}
+          .value=${String(this._value[name] ?? "")}
           @change=${(ev) => this._setNumber(name, ev.target.value, min, max)}
         />
       </div>
@@ -807,6 +821,11 @@ export class IsraelTransitCardEditor extends LitElement {
           ])
         : nothing}
       ${hasRail ? this._renderText("rail_destination", this._t("mode_2")) : nothing}
+      <div class="grid">
+        ${this._renderNumber("walk_minutes", this._t("editorWalk"), 0, 60, this._t("editorWalkHelp"))}
+        ${this._renderNumber("alert_minutes", this._t("editorAlertMinutes"), 0, 60)}
+      </div>
+      ${this._renderNotify()}
       ${this._renderCheck("show_map", this._t("editorShowMap"), this._t("editorShowMapHelp"))}
       <details class="panel">
         <summary>
@@ -818,6 +837,18 @@ export class IsraelTransitCardEditor extends LitElement {
         </div>
       </details>
     `;
+  }
+
+  /** לאן נשלחת ההתראה מפרטי הקו. בלי בחירה: הטלפונים של מי שלוחץ. */
+  _renderNotify() {
+    const targets = Object.keys(this.hass.states || {})
+      .filter((id) => id.startsWith("notify."))
+      .map((id) => [id, this.hass.states[id].attributes?.friendly_name || id]);
+    if (!targets.length) return nothing;
+    return this._renderSelect("notify_entity", this._t("editorNotify"), [
+      ["", this._t("editorNotifyMine")],
+      ...targets,
+    ]);
   }
 
   // -- rendering -------------------------------------------------------------
@@ -892,19 +923,38 @@ export class IsraelTransitCardEditor extends LitElement {
               : nothing}
         </div>
         ${!this._searching && this._results.length
-          ? html`<div class="results">
-              ${this._results.map(
-                (stop) => html`
-                  <button class="result" @click=${() => this._pick(stop)}>
-                    <span class="primary">${stop.name}</span>
-                    <span class="secondary">${stopSub(stop)}</span>
-                  </button>
-                `,
-              )}
-            </div>`
-          : nothing}
+          ? this._renderResults(this._results)
+          : !(this._query ?? "").trim() && this._nearby?.length
+            ? html`<div class="status">${this._t("editorNearby")}</div>
+                ${this._renderResults(this._nearby)}`
+            : nothing}
       </div>
     `;
+  }
+
+  _renderResults(stops) {
+    return html`<div class="results">
+      ${stops.map(
+        (stop) => html`
+          <button class="result" @click=${() => this._pick(stop)}>
+            <span class="primary">${stop.name}</span>
+            <span class="secondary"
+              >${[stopSub(stop), stop.distance != null ? this._distance(stop.distance) : ""]
+                .filter(Boolean)
+                .join(" · ")}</span
+            >
+          </button>
+        `,
+      )}
+    </div>`;
+  }
+
+  /** "350 מ׳" או "1.2 ק״מ", כמו בהוספת תחנה באינטגרציה. */
+  _distance(metres) {
+    const he = languageOf(this.hass) === "he";
+    return metres < 1000
+      ? `${Math.round(metres / 10) * 10} ${he ? "מ׳" : "m"}`
+      : `${(metres / 1000).toFixed(1)} ${he ? "ק״מ" : "km"}`;
   }
 
   _renderLines() {

@@ -260,6 +260,38 @@ def test_the_saturday_service_appears_on_a_saturday(index):
     assert _clock(_window(index, datetime(2026, 9, 5, 11, 55, tzinfo=IL))) == ["12:05"]
 
 
+def test_the_next_service_after_friday_afternoon_is_on_saturday(index):
+    """מחפשים קדימה גם מעבר לחלון של הלוח: שישי אחר הצהריים -> שבת."""
+    friday = datetime(2026, 9, 4, 13, 0, tzinfo=IL)
+
+    arrival = gtfs.next_scheduled(index, 35962, friday, friday + timedelta(days=4))
+
+    assert arrival is not None
+    assert arrival.eta.strftime("%a %H:%M") == "Sat 12:05"
+    assert arrival.line_name == "1"
+    assert arrival.is_realtime is False
+
+
+def test_the_next_service_after_saturday_is_on_sunday(index):
+    saturday = datetime(2026, 9, 5, 13, 0, tzinfo=IL)
+
+    arrival = gtfs.next_scheduled(index, 35962, saturday, saturday + timedelta(days=4))
+
+    assert arrival is not None
+    assert arrival.eta.strftime("%Y-%m-%d %H:%M") == "2026-09-06 12:00"
+
+
+def test_no_next_service_for_a_stop_without_a_timetable(index):
+    now = datetime(2026, 9, 4, 13, 0, tzinfo=IL)
+
+    assert gtfs.next_scheduled(index, 1, now, now + timedelta(days=4)) is None
+
+
+def test_stops_in_box_keeps_to_the_box(index):
+    assert [s.code for s in gtfs.stops_in_box(index, 32.0105, 34.7495, 0.01)] == [35962]
+    assert gtfs.stops_in_box(index, 32.2, 34.9, 0.01) == []
+
+
 def test_a_trip_running_past_midnight_is_found_after_midnight(index):
     """A 25:00:00 departure belongs to the previous service day."""
     rows = _window(index, datetime(2026, 8, 31, 0, 45, tzinfo=IL))

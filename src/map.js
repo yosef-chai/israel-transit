@@ -2,7 +2,7 @@ import { LitElement, css, html, nothing } from "lit";
 
 import { ICONS, icon, iconMarkup } from "./icons.js";
 import { createColorResolver, distanceM, toLngLat } from "./map-geometry.js";
-import { reducedMotion } from "./util.js";
+import { VEHICLE_PICKED, reducedMotion } from "./util.js";
 
 // MapLibre is served beside the card (esbuild.config.mjs copies it into a
 // folder named after its version) and imported the first time a map opens, so
@@ -243,6 +243,15 @@ export class IsraelTransitMap extends LitElement {
       animation: pulse 2s ease-out infinite;
     }
 
+    .vehicle[role="button"] {
+      cursor: pointer;
+    }
+
+    .vehicle:focus-visible .dot {
+      outline: 2px solid var(--ha-color-focus, var(--primary-color));
+      outline-offset: 2px;
+    }
+
     .vehicle.stale .dot {
       background: var(--it-stale);
       border-style: dashed;
@@ -461,11 +470,11 @@ export class IsraelTransitMap extends LitElement {
   _stop() {
     this._generation = (this._generation ?? 0) + 1;
     this._starting = false;
-    cancelAnimationFrame(this._glide);
+    this._vehicleMarkers?.forEach((marker) => cancelAnimationFrame(marker.glide));
     clearTimeout(this._contextTimer);
     this._resize?.disconnect();
     this._resize = undefined;
-    this._vehicleMarker = undefined;
+    this._vehicleMarkers = undefined;
     this._mineMarker = undefined;
     try {
       this._map?.remove();
@@ -767,33 +776,52 @@ export class IsraelTransitMap extends LitElement {
       this._mineMarker = undefined;
     }
 
-    const vehicle = view.vehicle;
-    if (!vehicle) {
-      cancelAnimationFrame(this._glide);
-      this._vehicleMarker?.remove();
-      this._vehicleMarker = undefined;
-      return;
+    // רכב אחד בפרטי הקו, כמה רכבים במבט על התחנה. כל אחד נשמר לפי המזהה שלו,
+    // כדי שיגלוש למיקום החדש ולא ייווצר מחדש בכל רענון.
+    const vehicles = view.vehicles ?? (view.vehicle ? [view.vehicle] : []);
+    this._vehicleMarkers ??= new Map();
+    const seen = new Set();
+    vehicles.forEach((vehicle, index) => {
+      const id = vehicle.id ?? String(index);
+      seen.add(id);
+      let marker = this._vehicleMarkers.get(id);
+      if (!marker) {
+        const element = document.createElement("div");
+        element.className = "vehicle";
+        element.innerHTML =
+          `<span class="pulse"></span><span class="dot"></span><span class="line"></span>`;
+        if (view.vehicles) {
+          element.tabIndex = 0;
+          const pick = () =>
+            this.dispatchEvent(new CustomEvent(VEHICLE_PICKED, { detail: { id } }));
+          element.addEventListener("click", pick);
+          element.addEventListener("keydown", (ev) => ev.key === "Enter" && pick());
+        }
+        marker = new maplibre.Marker({ element }).setLngLat(toLngLat(vehicle.point)).addTo(map);
+        this._vehicleMarkers.set(id, marker);
+      }
+      const element = marker.getElement();
+      Object.entries(vars).forEach(([name, value]) => element.style.setProperty(name, value));
+      if (vehicle.color) {
+        element.style.setProperty("--it-color", resolveColor(vehicle.color, c.route));
+      }
+      element.classList.toggle("stale", Boolean(vehicle.stale));
+      element.querySelector(".dot").innerHTML = iconMarkup(vehicle.icon, 16);
+      element.querySelector(".line").textContent = vehicle.lineName ?? "";
+      element.setAttribute("role", view.vehicles ? "button" : "img");
+      element.setAttribute("aria-label", vehicle.label ?? "");
+      this._glideTo(marker, vehicle.point);
+    });
+    for (const [id, marker] of this._vehicleMarkers) {
+      if (seen.has(id)) continue;
+      cancelAnimationFrame(marker.glide);
+      marker.remove();
+      this._vehicleMarkers.delete(id);
     }
-    if (!this._vehicleMarker) {
-      const element = document.createElement("div");
-      element.className = "vehicle";
-      element.innerHTML =
-        `<span class="pulse"></span><span class="dot"></span><span class="line"></span>`;
-      this._vehicleMarker = new maplibre.Marker({ element }).setLngLat(toLngLat(vehicle.point)).addTo(map);
-    }
-    const element = this._vehicleMarker.getElement();
-    Object.entries(vars).forEach(([name, value]) => element.style.setProperty(name, value));
-    element.classList.toggle("stale", Boolean(vehicle.stale));
-    element.querySelector(".dot").innerHTML = iconMarkup(vehicle.icon, 16);
-    element.querySelector(".line").textContent = vehicle.lineName ?? "";
-    element.setAttribute("role", "img");
-    element.setAttribute("aria-label", vehicle.label ?? "");
-    this._glideTo(vehicle.point);
   }
 
-  _glideTo(point) {
-    const marker = this._vehicleMarker;
-    cancelAnimationFrame(this._glide);
+  _glideTo(marker, point) {
+    cancelAnimationFrame(marker.glide);
     const { lng, lat } = marker.getLngLat();
     const from = [lat, lng];
     if (from[0] === point[0] && from[1] === point[1]) return;
@@ -809,9 +837,9 @@ export class IsraelTransitMap extends LitElement {
         from[1] + (point[1] - from[1]) * eased,
         from[0] + (point[0] - from[0]) * eased,
       ]);
-      if (t < 1) this._glide = requestAnimationFrame(step);
+      if (t < 1) marker.glide = requestAnimationFrame(step);
     };
-    this._glide = requestAnimationFrame(step);
+    marker.glide = requestAnimationFrame(step);
   }
 
   // -- rendering -----------------------------------------------------------

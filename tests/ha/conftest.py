@@ -93,6 +93,8 @@ def mock_index() -> Generator[AsyncMock]:
         index.async_route_shape = AsyncMock(return_value=None)
         index.built = "2026-08-30T04:00:00"
         index.async_departures = AsyncMock(return_value=[])
+        index.async_next_departure = AsyncMock(return_value=None)
+        index.async_nearest_stops = AsyncMock(return_value=[])
         yield index
 
 

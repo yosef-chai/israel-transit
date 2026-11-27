@@ -1,6 +1,10 @@
 import { IsraelTransitCard } from "./card.js";
 import { IsraelTransitDialog } from "./dialog.js";
-import { IsraelTransitRouteDialog, IsraelTransitStopDialog } from "./dialogs.js";
+import {
+  IsraelTransitOverviewDialog,
+  IsraelTransitRouteDialog,
+  IsraelTransitStopDialog,
+} from "./dialogs.js";
 import { IsraelTransitCardEditor } from "./editor.js";
 import { localize } from "./localize.js";
 import { IsraelTransitMap } from "./map.js";
@@ -14,6 +18,7 @@ define("israel-transit-card", IsraelTransitCard);
 define("israel-transit-card-editor", IsraelTransitCardEditor);
 define("israel-transit-stop-dialog", IsraelTransitStopDialog);
 define("israel-transit-route-dialog", IsraelTransitRouteDialog);
+define("israel-transit-overview-dialog", IsraelTransitOverviewDialog);
 define("israel-transit-dialog", IsraelTransitDialog);
 define("israel-transit-map", IsraelTransitMap);
 

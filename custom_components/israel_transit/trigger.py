@@ -86,6 +86,19 @@ _ARRIVAL_SCHEMA = vol.Schema(
     }
 )
 
+# ההיסט כאן הוא רק "לפני": כמה זמן לפני רגע היציאה להזכיר.
+_LEAVE_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_TARGET): cv.TARGET_FIELDS,
+        vol.Required(CONF_OPTIONS, default=dict): {
+            vol.Optional(CONF_LINE): _LINE,
+            vol.Required(CONF_OFFSET, default=timedelta(0)): vol.All(
+                cv.positive_time_period, vol.Range(max=TRIGGER_MAX_OFFSET)
+            ),
+        },
+    }
+)
+
 _DELAY_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_TARGET): cv.TARGET_FIELDS,
@@ -166,6 +179,8 @@ class _StopRunner:
         # Trips already fired for, and when, so that none fires twice.
         self.fired: dict[int, tuple[_Trip, datetime]] = {}
         self._unsubs: dict[int, CALLBACK_TYPE] = {}
+        # דקות ההליכה של כל תחנה, כפי שנקראו ברענון האחרון שלה.
+        self.walks: dict[int, int] = {}
 
     @callback
     def async_start(self) -> None:
@@ -203,6 +218,7 @@ class _StopRunner:
     def arrivals(
         self, coordinator: IsraelTransitCoordinator, now: datetime
     ) -> list[Arrival]:
+        self.walks[coordinator.stop_code] = coordinator.walk_minutes
         # None until the stop's first read succeeds, whatever the type says.
         data: StopData | None = coordinator.data
         if data is None:
@@ -257,6 +273,8 @@ class _StopRunner:
         # נמדד מהרגע שבו הטריגר היה אמור לירות, ומעוגל: טיימר שהתעורר אחרי כמה
         # מילישניות לא הופך "5 דקות לפני" ל-4. נסיעה שהופיעה מאוחר נמדדת מעכשיו.
         moment = max(now, trip.fire_at)
+        walk = self.walks.get(trip.stop_code, 0)
+        leave_at = a.eta - timedelta(minutes=walk)
         self.run_action(
             {
                 "stop_code": trip.stop_code,
@@ -266,6 +284,11 @@ class _StopRunner:
                 "operator": localized(a.operator, lang) or None,
                 "eta": a.eta,
                 "minutes": max(0, round((a.eta - moment).total_seconds() / 60)),
+                "walk_minutes": walk,
+                "leave_at": leave_at,
+                "leave_minutes": max(
+                    0, round((leave_at - moment).total_seconds() / 60)
+                ),
                 "is_realtime": a.is_realtime,
                 "vehicle_ref": a.vehicle_ref,
                 "platform": a.platform,
@@ -301,6 +324,9 @@ class _ArrivalRunner(_StopRunner):
             self._unsub_timer = None
         self.pending.clear()
 
+    def fire_at(self, stop_code: int, arrival: Arrival) -> datetime:
+        return arrival.eta + self.offset
+
     @override
     @callback
     def async_evaluate(
@@ -317,7 +343,7 @@ class _ArrivalRunner(_StopRunner):
                 # on later boards is still recognised as the same trip.
                 self.fired[trip_id][0].arrival = arrival
                 continue
-            fire_at = arrival.eta + self.offset
+            fire_at = self.fire_at(code, arrival)
             if trip_id is None:
                 if initial and fire_at <= now:
                     # Already past when the automation came up: that moment
@@ -395,6 +421,21 @@ class _ArrivalRunner(_StopRunner):
         when = "before" if self.offset < timedelta(0) else "after"
         return (
             f"line {line} {abs(self.offset)} {when} arriving at stop {trip.stop_code}"
+        )
+
+
+class _LeaveRunner(_ArrivalRunner):
+    """יורה כשצריך לצאת מהבית: זמן ההגעה פחות ההליכה, ועוד ההיסט שנבחר לפניו."""
+
+    @override
+    def fire_at(self, stop_code: int, arrival: Arrival) -> datetime:
+        walk = timedelta(minutes=self.walks.get(stop_code, 0))
+        return arrival.eta - walk + self.offset
+
+    @override
+    def _description(self, trip: _Trip) -> str:
+        return (
+            f"time to leave for line {trip.arrival.line_name} at stop {trip.stop_code}"
         )
 
 
@@ -505,6 +546,29 @@ class ArrivalTrigger(_StopTrigger):
         )
 
 
+class LeaveTrigger(_StopTrigger):
+    """הזמן לצאת מהבית לתחנה, לפי דקות ההליכה שהוגדרו לה."""
+
+    _schema = _LEAVE_SCHEMA
+
+    @override
+    def _make_runner(
+        self,
+        stop_codes: set[int],
+        run_action: TriggerActionRunner,
+        did_not_trigger: TriggerNotTriggeredReporter | None,
+    ) -> _StopRunner:
+        offset: timedelta = self._options.get(CONF_OFFSET) or timedelta(0)
+        return _LeaveRunner(
+            self._hass,
+            stop_codes,
+            _line_option(self._options),
+            run_action,
+            did_not_trigger,
+            offset=-offset,
+        )
+
+
 class DelayTrigger(_StopTrigger):
     """A vehicle reported running late by at least a set number of minutes."""
 
@@ -529,6 +593,7 @@ class DelayTrigger(_StopTrigger):
 
 TRIGGERS: dict[str, type[Trigger]] = {
     "arrival": ArrivalTrigger,
+    "leave": LeaveTrigger,
     "delay": DelayTrigger,
 }
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,24 +38,35 @@ from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
+from homeassistant.util import dt as dt_util
 
+from .alerts import Alert, ArrivalAlerts, alert_key, async_user_notify_entities
 from .api import IsraelTransitError
 from .automation_helpers import async_resolve_stops
 from .const import (
+    ALERT_DEFAULT_MINUTES,
+    ALERT_STOPS_FALLBACK_MINUTES,
     BRAND_URL,
     CARD_FILENAME,
     CARD_URL,
     CONF_LIMIT,
+    CONF_LINE,
     CONF_LINES,
+    CONF_MINUTES,
+    CONF_NOTIFY_ENTITY_ID,
     CONF_QUERY,
     CONF_RAIL_DESTINATION,
     CONF_STOP_CODE,
+    CONF_STOPS,
+    DATA_ALERTS,
     DATA_CLIENTS,
     DOMAIN,
     GTFS_CHECK_INTERVAL_HOURS,
     ISSUE_INDEX_FAILED,
     ISSUE_INDEX_STALE,
+    SERVICE_CANCEL_ARRIVAL_ALERT,
     SERVICE_GET_ARRIVALS,
+    SERVICE_NOTIFY_ARRIVAL,
     SERVICE_REBUILD_TIMETABLE,
     SERVICE_REFRESH_STOP,
     SERVICE_SEARCH_STOPS,
@@ -65,8 +76,11 @@ from .coordinator import (
     Clients,
     IsraelTransitConfigEntry,
     IsraelTransitCoordinator,
+    StopData,
     async_find_coordinator,
+    async_walk_minutes,
 )
+from .phrases import board_summary
 from .websocket_api import async_register as async_register_websocket
 from .websocket_api import async_stop_board
 
@@ -92,6 +106,19 @@ SEARCH_STOPS_SCHEMA = vol.Schema(
         ),
     }
 )
+_ALERT_FIELDS = {
+    vol.Required(CONF_STOP_CODE): vol.Coerce(int),
+    vol.Required(CONF_LINE): vol.All(cv.string, vol.Strip, vol.Length(min=1)),
+    vol.Optional(CONF_NOTIFY_ENTITY_ID): cv.entities_domain("notify"),
+}
+NOTIFY_ARRIVAL_SCHEMA = vol.Schema(
+    {
+        **_ALERT_FIELDS,
+        vol.Optional(CONF_MINUTES): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
+        vol.Optional(CONF_STOPS): vol.All(vol.Coerce(int), vol.Range(min=1, max=20)),
+    }
+)
+CANCEL_ARRIVAL_ALERT_SCHEMA = vol.Schema(_ALERT_FIELDS)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -99,6 +126,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     domain_data = hass.data.setdefault(DOMAIN, {})
     clients = Clients(hass)
     domain_data[DATA_CLIENTS] = clients
+    alerts = domain_data[DATA_ALERTS] = ArrivalAlerts(hass, clients)
     # התחנות שכרטיסים שאלו עליהן בהרצות קודמות, כדי שהאינדקס ייבנה איתן מראש.
     await clients.stops.async_load()
     async_register_websocket(hass)
@@ -109,6 +137,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async def _async_close(_event: Any) -> None:
         cancel_check()
+        alerts.async_shutdown()
         clients.async_cancel_pending()
         await clients.index.async_close()
 
@@ -254,41 +283,66 @@ def _async_register_actions(hass: HomeAssistant) -> None:
     """
 
     async def async_get_arrivals(call: ServiceCall) -> ServiceResponse:
-        clients = _clients(hass)
         stop_code: int = call.data[CONF_STOP_CODE]
-        clients.async_note_stop(stop_code)
+        data = await async_service_board(
+            hass, stop_code, call.data.get(CONF_RAIL_DESTINATION)
+        )
+        return arrivals_response(
+            hass, data, set(call.data.get(CONF_LINES) or []), dt_util.utcnow()
+        )
+
+    async def async_notify_arrival(call: ServiceCall) -> None:
+        stop_code: int = call.data[CONF_STOP_CODE]
+        line: str = call.data[CONF_LINE]
+        coordinator = async_find_coordinator(hass, stop_code)
+        data = await async_service_board(
+            hass,
+            stop_code,
+            coordinator.rail_destination if coordinator is not None else None,
+        )
+        if data.routes and line not in {
+            route.short_name or route.line_ref for route in data.routes
+        }:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="unknown_line",
+                translation_placeholders={"line": line, "stop_code": str(stop_code)},
+            )
+        stops: int | None = call.data.get(CONF_STOPS)
+        minutes = call.data.get(
+            CONF_MINUTES,
+            ALERT_DEFAULT_MINUTES if stops is None else ALERT_STOPS_FALLBACK_MINUTES,
+        )
         try:
-            # דרך ה-coordinator והמטמון, כמו הכרטיס: אוטומציה שרצה כל דקה לא
-            # צריכה לפנות ל-curlbus מעבר למה שכבר נשלף.
-            data = await async_stop_board(
-                hass, stop_code, call.data.get(CONF_RAIL_DESTINATION)
+            await _alerts(hass).async_add(
+                Alert(
+                    stop_code=stop_code,
+                    line=line,
+                    minutes=minutes,
+                    stops=stops,
+                    targets=_alert_targets(hass, call),
+                    context=call.context,
+                )
             )
         except IsraelTransitError as err:
-            placeholders = {"stop_code": str(stop_code), "error": str(err)}
-            if clients.index.available and not clients.rebuilding:
-                # A complete index that does not know the code: the code is
-                # wrong, which is the caller's to fix, not an outage.
-                raise ServiceValidationError(
-                    translation_domain=DOMAIN,
-                    translation_key="unknown_stop",
-                    translation_placeholders=placeholders,
-                ) from err
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="stop_unavailable",
-                translation_placeholders=placeholders,
+                translation_placeholders={
+                    "stop_code": str(stop_code),
+                    "error": str(err),
+                },
             ) from err
-        if data.realtime_error and not data.arrivals:
-            clients.async_request_timetable(stop_code)
 
-        payload = data.as_dict(hass.config.language)
-        if wanted := set(call.data.get(CONF_LINES) or []):
-            payload["arrivals"] = [
-                arrival
-                for arrival in payload["arrivals"]
-                if arrival["line_name"] in wanted
-            ]
-        return payload
+    async def async_cancel_arrival_alert(call: ServiceCall) -> None:
+        # ביטול של התראה שכבר ירתה או שפגה אינו שגיאה: התוצאה זהה.
+        _alerts(hass).async_cancel(
+            alert_key(
+                call.data[CONF_STOP_CODE],
+                call.data[CONF_LINE],
+                _alert_targets(hass, call),
+            )
+        )
 
     async def async_refresh_stop(call: ServiceCall) -> None:
         codes = async_resolve_stops(hass, call.data)
@@ -356,6 +410,97 @@ def _async_register_actions(hass: HomeAssistant) -> None:
     hass.services.async_register(
         DOMAIN, SERVICE_REBUILD_TIMETABLE, async_rebuild_timetable
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_NOTIFY_ARRIVAL,
+        async_notify_arrival,
+        schema=NOTIFY_ARRIVAL_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CANCEL_ARRIVAL_ALERT,
+        async_cancel_arrival_alert,
+        schema=CANCEL_ARRIVAL_ALERT_SCHEMA,
+    )
+
+
+def _alerts(hass: HomeAssistant) -> ArrivalAlerts:
+    alerts: ArrivalAlerts = hass.data[DOMAIN][DATA_ALERTS]
+    return alerts
+
+
+@callback
+def _alert_targets(hass: HomeAssistant, call: ServiceCall) -> list[str]:
+    """הנמענים שנבחרו, ובלי בחירה: הטלפונים של מי שקרא לפעולה."""
+    if targets := call.data.get(CONF_NOTIFY_ENTITY_ID):
+        return list(targets)
+    if targets := async_user_notify_entities(hass, call.context.user_id):
+        return targets
+    raise ServiceValidationError(
+        translation_domain=DOMAIN, translation_key="no_notify_target"
+    )
+
+
+async def async_service_board(
+    hass: HomeAssistant, stop_code: int, rail_destination: str | None
+) -> StopData:
+    """הלוח של תחנה לפעולה או לכלי של Assist, עם שגיאה שמסבירה מה לעשות.
+
+    דרך ה-coordinator והמטמון, כמו הכרטיס: אוטומציה שרצה כל דקה לא צריכה
+    לפנות ל-curlbus מעבר למה שכבר נשלף.
+    """
+    clients = _clients(hass)
+    clients.async_note_stop(stop_code)
+    try:
+        data = await async_stop_board(hass, stop_code, rail_destination)
+    except IsraelTransitError as err:
+        placeholders = {"stop_code": str(stop_code), "error": str(err)}
+        if clients.index.available and not clients.rebuilding:
+            # A complete index that does not know the code: the code is
+            # wrong, which is the caller's to fix, not an outage.
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="unknown_stop",
+                translation_placeholders=placeholders,
+            ) from err
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="stop_unavailable",
+            translation_placeholders=placeholders,
+        ) from err
+    if data.realtime_error and not data.arrivals:
+        clients.async_request_timetable(stop_code)
+    return data
+
+
+@callback
+def arrivals_response(
+    hass: HomeAssistant,
+    data: StopData,
+    lines: set[str],
+    now: datetime,
+    lang: str | None = None,
+) -> dict[str, Any]:
+    """תשובת get_arrivals: הלוח, זמן היציאה מהבית, ומשפט סיכום מוכן להקראה."""
+    lang = lang or hass.config.language
+    walk = async_walk_minutes(hass, data.stop.code)
+    rows = [a for a in data.upcoming(now) if not lines or a.line_name in lines]
+    payload = data.as_dict(lang, now)
+    payload["arrivals"] = [
+        {
+            **a.as_dict(lang, now),
+            # שלילי: כבר מאוחר מדי לצאת ולהספיק. None: לא הוגדר זמן הליכה.
+            "leave_minutes": (
+                int((a.eta.timestamp() - now.timestamp()) // 60) - walk
+                if walk
+                else None
+            ),
+        }
+        for a in rows
+    ]
+    payload["walk_minutes"] = walk
+    payload["summary"] = board_summary(data, rows, lang, now, walk)
+    return payload
 
 
 async def _async_register_card(hass: HomeAssistant) -> None:

@@ -150,6 +150,30 @@ async def test_the_index_answers_every_query_the_card_makes(
     assert all(d.is_realtime is False for d in departures)
 
 
+async def test_the_nearest_stops_come_closest_first(built_index: GtfsIndex) -> None:
+    await built_index.async_load()
+
+    # ליד הקוממיות. קרית אריה רחוקה ב-0.12 מעלות אורך, מחוץ לריבוע הגדול ביותר.
+    found = await built_index.async_nearest_stops(32.0105, 34.7505, 3)
+
+    assert [stop.code for stop, _ in found] == [35962, 21023]
+    assert found[0][1] < 100
+    assert await built_index.async_nearest_stops(52.37, 4.89, 3) == []
+
+
+async def test_after_friday_service_the_next_one_is_on_sunday(
+    built_index: GtfsIndex,
+) -> None:
+    """בפיד הקטן אין שירות בשישי ובשבת, מלבד נסיעת הלילה של חמישי (01:20)."""
+    await built_index.async_load()
+    friday_night = datetime(2026, 9, 4, 2, 0, tzinfo=IL)
+
+    following = await built_index.async_next_departure(35962, friday_night)
+
+    assert following is not None
+    assert following.eta.strftime("%a %H:%M") == "Sun 12:00"
+
+
 async def test_closing_releases_the_database(built_index: GtfsIndex) -> None:
     await built_index.async_load()
     await built_index.async_close()

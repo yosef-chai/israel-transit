@@ -137,6 +137,14 @@
         <israel-transit-card id="ordered"></israel-transit-card>
       </div>
       <div class="col">
+        <h3>Shabbat: nothing due, next service after it (21025)</h3>
+        <israel-transit-card id="shabbat"></israel-transit-card>
+      </div>
+      <div class="col">
+        <h3>6 minutes' walk to the stop (21023)</h3>
+        <israel-transit-card id="walk"></israel-transit-card>
+      </div>
+      <div class="col">
         <h3>Line detail: map, legend, timeline</h3>
         <div id="route-host" class="pinned"></div>
       </div>
@@ -276,6 +284,22 @@
         updated_at: iso(-5),
       };
 
+      // שבת: אין כלום בשעות הקרובות, והשרת אומר מתי השירות חוזר.
+      const nextSaturdayNight = (() => {
+        const date = new Date();
+        date.setDate(date.getDate() + ((6 - date.getDay() + 7) % 7));
+        date.setHours(20, 15, 0, 0);
+        return date.toISOString();
+      })();
+      FIXTURES[21025] = {
+        ...FIXTURES[21023],
+        stop: { ...FIXTURES[21023].stop, code: 21025 },
+        arrivals: [],
+        refresh_seconds: 900,
+        updated_at: iso(-9),
+        next_service: { line_name: "36", destination: "מסוף אור יהודה", route_type: "3", eta: nextSaturdayNight },
+      };
+
       // The backend stores offsets from the start of a run and turns them into
       // absolute times only when the caller passes the vehicle's departure.
       const ROUTE_PATTERN = [
@@ -336,7 +360,14 @@
             return routeStops(msg.departed, msg.line_ref !== "7020");
           }
           if (msg.type.endsWith("/search_stops")) return SEARCH;
+          if (msg.type.endsWith("/nearby_stops")) {
+            return SEARCH.map((stop, i) => ({ ...stop, distance: [140, 180, 2600][i] }));
+          }
           throw new Error(`unhandled ${msg.type}`);
+        },
+        callService: async (domain, service, data) => {
+          await new Promise((r) => setTimeout(r, 120));
+          console.info("callService", domain, service, data);
         },
       };
 
@@ -375,6 +406,8 @@
         show_clock: true,
         show_mode_icon: true,
       });
+      mount("shabbat", { stop_code: 21025 });
+      mount("walk", { stop_code: 21023, walk_minutes: 6 });
 
       // The two dialog states worth looking at side by side.
       const pinDialog = async (hostId, arrival, stopCode) => {

@@ -52,6 +52,12 @@ CONF_LINES: Final = "lines"
 CONF_SCAN_INTERVAL: Final = "scan_interval"
 CONF_RAIL_DESTINATION: Final = "rail_destination"
 CONF_QUERY: Final = "query"
+CONF_NEARBY: Final = "nearby"
+# דקות הליכה מהבית לתחנה. 0 הוא "לא הוגדר", וזמן היציאה הוא אז זמן ההגעה.
+CONF_WALK_MINUTES: Final = "walk_minutes"
+MAX_WALK_MINUTES: Final = 60
+# מי שהיה צריך לצאת לפני פחות מדקה עוד יכול להספיק בהליכה מהירה.
+LEAVE_GRACE: Final = timedelta(minutes=1)
 
 # hass.data keys
 DATA_CLIENTS: Final = "clients"
@@ -114,6 +120,37 @@ STOP_REGISTRY_SAVE_DELAY: Final = 30
 NEW_STOP_INDEX_DELAY: Final = 20
 # גג לניסיונות חוזרים כשהבנייה נכשלת: אחרת כל רענון של כרטיס היה מזמין עוד אחת.
 TIMETABLE_REQUEST_COOLDOWN: Final = 1800.0
+
+# --- Adaptive polling -------------------------------------------------------
+# תחנה בלי שום נסיעה בשעות הקרובות (לילה, שבת, חג) נשאלת לכל היותר פעם ברבע
+# שעה, ומתעוררת לקצב הרגיל עשר דקות לפני הנסיעה הבאה שבלוח הזמנים.
+IDLE_POLL_MAX: Final = timedelta(minutes=15)
+IDLE_WAKE_LEAD: Final = timedelta(minutes=10)
+# כשהנסיעה הקרובה רחוקה מחצי שעה, רענון כל חמש דקות מספיק.
+SPARSE_POLL: Final = timedelta(minutes=5)
+SPARSE_GAP: Final = timedelta(minutes=30)
+# עד כמה קדימה מחפשים את השירות הבא: שבת שצמודה לחג של יומיים.
+NEXT_SERVICE_DAYS: Final = timedelta(days=4)
+
+# --- Stops near home --------------------------------------------------------
+NEARBY_STOPS: Final = 8
+# חצי צלע של ריבוע החיפוש, במעלות (0.01 הוא כקילומטר), מהקטן לגדול.
+NEARBY_SEARCH_BOXES: Final = (0.01, 0.03, 0.1)
+
+# --- Arrival alerts ---------------------------------------------------------
+SERVICE_NOTIFY_ARRIVAL: Final = "notify_arrival"
+SERVICE_CANCEL_ARRIVAL_ALERT: Final = "cancel_arrival_alert"
+EVENT_ARRIVAL_ALERT: Final = f"{DOMAIN}_arrival_alert"
+DATA_ALERTS: Final = "alerts"
+CONF_STOPS: Final = "stops"
+CONF_NOTIFY_ENTITY_ID: Final = "notify_entity_id"
+ALERT_DEFAULT_MINUTES: Final = 5
+# התראה לפי תחנות צריכה מיקום חי. בלעדיו היא יורה דקה לפני ההגעה, ולא שותקת.
+ALERT_STOPS_FALLBACK_MINUTES: Final = 1
+ALERT_CHECK_INTERVAL: Final = timedelta(seconds=30)
+ALERT_MAX_AGE: Final = timedelta(hours=2)
+# רכב רחוק מזה מכל תחנה בקו לא נספר כ"על המסלול" (כמו בכרטיס).
+NEAREST_STOP_MAX_M: Final = 2000
 
 # --- Real-time backoff ------------------------------------------------------
 # curlbus עונה 500 לצמיתות על קודי תחנה שמסד הנתונים הסטטי שלו לא מכיר. אחרי

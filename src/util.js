@@ -1,12 +1,20 @@
-import { localize } from "./localize.js";
+import { languageOf, localize } from "./localize.js";
 
 export const DOMAIN = "israel_transit";
+
+// התחבורה בישראל, ולכן "היום", "מחר" ו"מוצ״ש" נמדדים בשעון ישראל.
+const IL_TZ = "Asia/Jerusalem";
+// שירות בשבת מהשעה הזו הוא "מוצ״ש": אין תחבורה ציבורית לפני צאת השבת.
+const MOTZASH_HOUR = 17;
 
 // Namespaced on purpose. Home Assistant listens for a bare "dialog-closed" on
 // the document and reads ev.detail.dialog off it, so firing that name -- which
 // this card used to do, composed and with no detail -- crashed HA's quick-bar
 // mixin every time a detail view was closed.
 export const DIALOG_CLOSED = "israel-transit-dialog-closed";
+// רכב שנבחר במפה של המבט על (detail.id), ונסיעה שנבחרה בו לפתיחה (detail.arrival).
+export const VEHICLE_PICKED = "israel-transit-vehicle-picked";
+export const OPEN_ARRIVAL = "israel-transit-open-arrival";
 
 // The one place these colours are written down: styles.js turns the light ones
 // into the --it-mode-* custom properties for badges (white text on them is at
@@ -96,6 +104,48 @@ export const formatClock = (iso, hass) => {
   } catch {
     return date.toTimeString().slice(0, 5);
   }
+};
+
+const israelParts = (date) => {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: IL_TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      weekday: "short",
+      hour: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(date)
+      .map((part) => [part.type, part.value]),
+  );
+  return { day: `${parts.year}-${parts.month}-${parts.day}`, weekday: parts.weekday, hour: Number(parts.hour) };
+};
+
+/** "היום ב-22:00", "מחר ב-06:00", "במוצ״ש ב-20:15", "ביום ראשון ב-06:00". */
+export const whenPhrase = (hass, iso, now = Date.now()) => {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const time = formatClock(iso, hass);
+  const at = israelParts(date);
+  if (at.weekday === "Sat" && at.hour >= MOTZASH_HOUR) return localize(hass, "whenMotzash", { time });
+  if (at.day === israelParts(new Date(now)).day) return localize(hass, "whenToday", { time });
+  if (at.day === israelParts(new Date(now + 86400000)).day) {
+    return localize(hass, "whenTomorrow", { time });
+  }
+  const day = new Intl.DateTimeFormat(languageOf(hass) === "he" ? "he-IL" : "en-GB", {
+    weekday: "long",
+    timeZone: IL_TZ,
+  }).format(date);
+  return localize(hass, "whenWeekday", { day, time });
+};
+
+/** דקות עד שצריך לצאת מהבית; שלילי כשכבר מאוחר מדי. null בלי זמן הליכה. */
+export const leaveMinutes = (iso, walk, now = Date.now()) => {
+  const target = Date.parse(iso);
+  if (!walk || Number.isNaN(target)) return null;
+  return Math.floor((target - walk * 60000 - now) / 60000);
 };
 
 // What a failed WebSocket call means to the person looking at the card. The

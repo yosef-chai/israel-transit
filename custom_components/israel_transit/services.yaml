@@ -41,4 +41,65 @@ search_stops:
           max: 50
           mode: box
 
+notify_arrival:
+  fields:
+    stop_code:
+      required: true
+      example: 21023
+      selector:
+        number:
+          min: 1
+          max: 999999
+          mode: box
+    line:
+      required: true
+      example: "18"
+      selector:
+        text:
+    minutes:
+      required: false
+      example: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: min
+          mode: box
+    stops:
+      required: false
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 20
+          mode: box
+    notify_entity_id:
+      required: false
+      selector:
+        entity:
+          domain: notify
+          multiple: true
+
+cancel_arrival_alert:
+  fields:
+    stop_code:
+      required: true
+      example: 21023
+      selector:
+        number:
+          min: 1
+          max: 999999
+          mode: box
+    line:
+      required: true
+      example: "18"
+      selector:
+        text:
+    notify_entity_id:
+      required: false
+      selector:
+        entity:
+          domain: notify
+          multiple: true
+
 rebuild_timetable:

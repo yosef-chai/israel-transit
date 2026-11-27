@@ -11,9 +11,11 @@ import {
   formatClock,
   formatDelay,
   isDark,
+  leaveMinutes,
   minutesUntil,
   modeColor,
   modeLabel,
+  whenPhrase,
 } from "./util.js";
 
 // The backend answers every stop from a shared 60 s cache (or straight from a
@@ -26,7 +28,10 @@ const TICK_MS = 10000;
 // backend gives: "now" is often still pulling in. After that it has left.
 const DEPARTED_MS = 60000;
 // לוח שלא התעדכן יותר מזה מקבל תווית גיל: השרת מרענן כל דקה כברירת מחדל.
+// בלילה ובשבת השרת מרענן לאט יותר בכוונה, ואז הסף הוא הקצב שהוא הודיע עליו.
 const OLD_DATA_MINUTES = 2;
+// מי שהיה צריך לצאת לפני פחות מדקה עוד יכול להספיק, כמו בשרת.
+const LEAVE_GRACE_MINUTES = 1;
 // Heights in styles.js (cardStyles): the header with its city and code line,
 // one arrival row, and the padding under the list. Sizing follows them.
 const HEADER_PX = 72;
@@ -50,7 +55,11 @@ export const DEFAULTS = {
   show_delay: true,
   show_clock: false,
   show_map: true,
+  alert_minutes: 5,
 };
+
+// כמה תחנות לפני מציע כפתור ההתראה, כשהרכב משדר מיקום.
+const ALERT_STOPS = 2;
 
 export class IsraelTransitCard extends LitElement {
   static properties = {
@@ -60,6 +69,7 @@ export class IsraelTransitCard extends LitElement {
     _tick: { state: true },
     _stopDialog: { state: true },
     _routeDialog: { state: true },
+    _overview: { state: true },
   };
 
   static styles = [sharedStyles, cardStyles];
@@ -71,6 +81,7 @@ export class IsraelTransitCard extends LitElement {
     this._tick = 0;
     this._stopDialog = false;
     this._routeDialog = null;
+    this._overview = false;
   }
 
   /**
@@ -258,8 +269,15 @@ export class IsraelTransitCard extends LitElement {
     if (next) this._routeDialog = next;
   }
 
-  _t(key) {
-    return localize(this.hass, key);
+  _t(key, values) {
+    return localize(this.hass, key, values);
+  }
+
+  /** דקות ההליכה: מהגדרת הכרטיס, ואם אין, מהגדרות התחנה באינטגרציה. */
+  get _walk() {
+    const own = this._config?.walk_minutes;
+    const value = own === undefined || own === null || own === "" ? this._data?.walk_minutes : own;
+    return Math.max(0, Number(value) || 0);
   }
 
   /** Arrivals after the configured line filter, ordering and limits. */
@@ -316,7 +334,8 @@ export class IsraelTransitCard extends LitElement {
     const age = this._data
       ? dataAgeMinutes(this._data.updated_at, this._clockOffset ?? 0)
       : null;
-    const old = age !== null && age > OLD_DATA_MINUTES;
+    const expected = Math.ceil((Number(this._data?.refresh_seconds) || 0) / 60) + 1;
+    const old = age !== null && age > Math.max(OLD_DATA_MINUTES, expected);
     const stale = offline || old;
     const warning = [
       offline ? this._t("staleData") : "",
@@ -359,7 +378,7 @@ export class IsraelTransitCard extends LitElement {
                 </div>`
               : this._renderSkeleton()
             : arrivals.length === 0
-              ? this._renderEmpty(ICONS.empty, this._t("emptyTitle"), this._emptyMessage())
+              ? this._renderEmptyBoard()
               : arrivals.map((arrival) => this._renderRow(arrival))}
         </div>
         ${this._renderDialogs(stop)}
@@ -387,6 +406,24 @@ export class IsraelTransitCard extends LitElement {
       <p class="empty-title">${title}</p>
       ${text ? html`<p class="empty-text">${text}</p>` : nothing}
     </div>`;
+  }
+
+  /**
+   * לילה, שבת או חג: לא "אין מה להציג", אלא מתי השירות חוזר, לפי לוח הזמנים.
+   * השרת שולח את זה רק כשבכל התחנה אין שום נסיעה פעילה בשעות הקרובות.
+   */
+  _renderEmptyBoard() {
+    const next = this._data?.next_service;
+    const chosen = (this._config.lines || []).map(String);
+    // כרטיס של קווים מסוימים לא מבטיח נסיעה של קו אחר.
+    if (next && (!chosen.length || chosen.includes(String(next.line_name)))) {
+      return this._renderEmpty(
+        ICONS.noService,
+        this._t("noService"),
+        this._t("nextService", { line: next.line_name, when: whenPhrase(this.hass, next.eta) }),
+      );
+    }
+    return this._renderEmpty(ICONS.empty, this._t("emptyTitle"), this._emptyMessage());
   }
 
   /**
@@ -418,24 +455,36 @@ export class IsraelTransitCard extends LitElement {
     const city = this._config.show_city !== false && stop?.city;
     const code = this._config.show_stop_code !== false && stop?.code;
 
+    // כפתור בתוך כפתור אינו HTML תקין, ולכן הכותרת היא שני כפתורים זה לצד זה.
     return html`
-      <button
-        class="header"
-        part="header"
-        @click=${(ev) => this._open("_stopDialog", true, ev)}
-        aria-label=${`${title}. ${this._t("stopDetails")}`}
-      >
-        <div class="titles">
-          <div class="stop-name">${title}</div>
-          ${city || code
-            ? html`<div class="stop-meta">
-                ${city ? html`<span>${stop.city}</span>` : nothing}
-                ${code ? html`<span class="code ltr">${stop.code}</span>` : nothing}
-              </div>`
-            : nothing}
-        </div>
-        ${icon(ICONS.info, { size: 24, cls: "icon info" })}
-      </button>
+      <div class="header" part="header">
+        <button
+          class="header-main"
+          @click=${(ev) => this._open("_stopDialog", true, ev)}
+          aria-label=${`${title}. ${this._t("stopDetails")}`}
+        >
+          <div class="titles">
+            <div class="stop-name">${title}</div>
+            ${city || code
+              ? html`<div class="stop-meta">
+                  ${city ? html`<span>${stop.city}</span>` : nothing}
+                  ${code ? html`<span class="code ltr">${stop.code}</span>` : nothing}
+                </div>`
+              : nothing}
+          </div>
+          ${icon(ICONS.info, { size: 24, cls: "icon info" })}
+        </button>
+        ${this._config.show_map !== false && stop
+          ? html`<button
+              class="header-action"
+              title=${this._t("overviewOpen")}
+              aria-label=${this._t("overviewOpen")}
+              @click=${(ev) => this._open("_overview", true, ev)}
+            >
+              ${icon(ICONS.vehicles, { size: 24 })}
+            </button>`
+          : nothing}
+      </div>
     `;
   }
 
@@ -466,10 +515,12 @@ export class IsraelTransitCard extends LitElement {
           : `${Math.abs(arrival.delay_minutes)} ${this._t(
               arrival.delay_minutes > 0 ? "delayMinutes" : "earlyMinutes",
             )}`;
+    const leave = arrival.cancelled ? null : leaveMinutes(arrival.eta, this._walk);
+    const missed = leave !== null && leave < -LEAVE_GRACE_MINUTES;
 
     return html`
       <button
-        class="row ${arrival.cancelled ? "cancelled" : ""}"
+        class="row ${arrival.cancelled ? "cancelled" : ""} ${missed ? "missed" : ""}"
         @click=${(ev) => this._open("_routeDialog", arrival, ev)}
         aria-label=${[
           `${modeLabel(this.hass, arrival.route_type) || this._t("lineDetails")} ${arrival.line_name}`,
@@ -478,6 +529,7 @@ export class IsraelTransitCard extends LitElement {
           when,
           delayText,
           arrival.is_realtime ? this._t("live") : this._t("scheduled"),
+          this._leaveText(leave),
         ]
           .filter(Boolean)
           .join(", ")}
@@ -495,7 +547,7 @@ export class IsraelTransitCard extends LitElement {
           ${config.show_destination !== false
             ? html`<div class="destination">${destination}</div>`
             : nothing}
-          ${this._renderSub(arrival)}
+          ${this._renderSub(arrival, leave)}
         </div>
         <div class="eta ${minutes === 0 ? "eta-now" : ""}" aria-hidden="true">
           <div class="eta-main">
@@ -532,12 +584,27 @@ export class IsraelTransitCard extends LitElement {
     return parts.length ? html`<div class="eta-extra">${parts}</div>` : nothing;
   }
 
-  /** The second line of a row: operator, timetable tag, platform. */
-  _renderSub(arrival) {
+  /** "לצאת בעוד 3 דק׳", "לצאת עכשיו", או "כבר לא תספיקו". ריק בלי זמן הליכה. */
+  _leaveText(leave) {
+    // מעבר לשעה מציגים שעון ולא ספירה לאחור, וגם "לצאת בעוד 70 דק׳" לא אומר כלום.
+    if (leave === null || leave > 59) return "";
+    if (leave < -LEAVE_GRACE_MINUTES) return this._t("tooLate");
+    return leave <= 0 ? this._t("leaveNow") : this._t("leaveIn", { n: leave });
+  }
+
+  /** The second line of a row: when to leave, operator, timetable tag, platform. */
+  _renderSub(arrival, leave = null) {
     const config = this._config;
+    const leaveText = this._leaveText(leave);
     const parts = [
       arrival.cancelled
         ? html`<span class="tag cancelled-tag">${this._t("cancelled")}</span>`
+        : nothing,
+      leaveText
+        ? html`<span
+            class="tag leave ${leave < -LEAVE_GRACE_MINUTES ? "too-late" : leave <= 0 ? "leave-now" : ""}"
+            >${icon(ICONS.walk, { size: 14 })}${leaveText}</span
+          >`
         : nothing,
       config.show_operator !== false && arrival.operator
         ? html`<span class="operator">${arrival.operator}</span>`
@@ -568,6 +635,18 @@ export class IsraelTransitCard extends LitElement {
     </div>`;
   }
 
+  /** כל מה שבדרך, בסינון הקווים של הכרטיס אבל בלי הגבלת מספר השורות. */
+  _onTheWay() {
+    const chosen = (this._config.lines || []).map(String);
+    const cutoff = Date.now() - DEPARTED_MS;
+    return (this._data?.arrivals || []).filter(
+      (arrival) =>
+        !arrival.cancelled &&
+        !(Date.parse(arrival.eta) < cutoff) &&
+        (!chosen.length || chosen.includes(String(arrival.line_name))),
+    );
+  }
+
   _renderDialogs(stop) {
     return html`
       ${this._stopDialog
@@ -579,6 +658,21 @@ export class IsraelTransitCard extends LitElement {
             @israel-transit-dialog-closed=${() => (this._stopDialog = false)}
           ></israel-transit-stop-dialog>`
         : nothing}
+      ${this._overview
+        ? html`<israel-transit-overview-dialog
+            .hass=${this.hass}
+            .stop=${stop}
+            .arrivals=${this._onTheWay()}
+            .clockOffset=${this._clockOffset ?? 0}
+            .opener=${this._opener}
+            .open=${true}
+            @israel-transit-dialog-closed=${() => (this._overview = false)}
+            @israel-transit-open-arrival=${(ev) => {
+              this._overview = false;
+              this._routeDialog = ev.detail.arrival;
+            }}
+          ></israel-transit-overview-dialog>`
+        : nothing}
       ${this._routeDialog
         ? html`<israel-transit-route-dialog
             .hass=${this.hass}
@@ -586,6 +680,11 @@ export class IsraelTransitCard extends LitElement {
             .stopCode=${stop?.code ?? this._config.stop_code}
             .showMap=${this._config.show_map !== false}
             .clockOffset=${this._clockOffset ?? 0}
+            .alert=${{
+              minutes: Number(this._config.alert_minutes) || DEFAULTS.alert_minutes,
+              stops: ALERT_STOPS,
+              notify: this._config.notify_entity || null,
+            }}
             .opener=${this._opener}
             .open=${true}
             @israel-transit-dialog-closed=${() => (this._routeDialog = null)}

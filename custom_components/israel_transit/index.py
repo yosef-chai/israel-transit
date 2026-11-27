@@ -23,6 +23,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_call_later
+from homeassistant.util.location import distance
 
 from .api import ISRAEL_TZ, Arrival, RouteInfo, RouteStop, Stop
 from .const import (
@@ -32,6 +33,8 @@ from .const import (
     INDEX_RETRY_DELAYS,
     ISSUE_INDEX_FAILED,
     ISSUE_INDEX_STALE,
+    NEARBY_SEARCH_BOXES,
+    NEXT_SERVICE_DAYS,
     TIMETABLE_LOOKBACK,
 )
 from .gtfs import (
@@ -45,6 +48,7 @@ from .gtfs import (
     activate_index,
     connect,
     get_stop,
+    next_scheduled,
     route_shape,
     route_stops,
     routes_at_stop,
@@ -52,6 +56,7 @@ from .gtfs import (
     schema_is_readable,
     search_stops,
     stage_index,
+    stops_in_box,
     stored_built,
     stored_coverage_end,
     stored_max_sec,
@@ -430,6 +435,42 @@ class GtfsIndex:
 
     async def async_route_shape(self, route_id: int) -> list[list[float]] | None:
         return await self._query(route_shape, int(route_id))
+
+    async def async_nearest_stops(
+        self, lat: float, lon: float, limit: int
+    ) -> list[tuple[Stop, float]]:
+        """התחנות הקרובות לנקודה, עם המרחק במטרים, מהקרובה לרחוקה.
+
+        ריבוע שגדל בשלבים במקום סריקה של כל 35 אלף התחנות: בעיר הריבוע הראשון
+        כבר מספיק. נקודה מחוץ לישראל לא מוצאת כלום ומחזירה רשימה ריקה.
+        """
+        found: list[Stop] = []
+        for half in NEARBY_SEARCH_BOXES:
+            found = await self._query(stops_in_box, lat, lon, half)
+            if len(found) >= limit:
+                break
+        measured = [
+            (stop, metres)
+            for stop in found
+            if stop.lat is not None
+            and stop.lon is not None
+            and (metres := distance(lat, lon, stop.lat, stop.lon)) is not None
+        ]
+        measured.sort(key=lambda item: item[1])
+        return measured[:limit]
+
+    async def async_next_departure(
+        self, code: int, now: datetime | None = None
+    ) -> Arrival | None:
+        """הנסיעה המתוכננת הבאה בתחנה, עד כמה ימים קדימה (שבת וחג צמודים)."""
+        moment = (now or datetime.now(ISRAEL_TZ)).astimezone(ISRAEL_TZ)
+        return await self._query(
+            next_scheduled,
+            int(code),
+            moment,
+            moment + NEXT_SERVICE_DAYS,
+            self._max_sec,
+        )
 
     async def async_departures(
         self,

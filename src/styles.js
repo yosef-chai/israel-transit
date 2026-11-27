@@ -206,20 +206,56 @@ export const cardStyles = css`
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: var(--ha-space-3, 12px);
+    gap: var(--ha-space-1, 4px);
     width: 100%;
-    min-height: 48px;
     padding: var(--ha-space-4, 16px) var(--ha-space-4, 16px) var(--ha-space-2, 8px);
+    box-sizing: border-box;
+  }
+
+  .header-main {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: var(--ha-space-3, 12px);
+    min-width: 0;
+    min-height: 48px;
+    padding: 0;
     border: none;
     background: none;
     color: inherit;
     font: inherit;
     text-align: start;
     cursor: pointer;
-    box-sizing: border-box;
   }
 
-  .header:focus-visible,
+  /* כפתור אייקון בגודל של ha-icon-button: 40 פיקסלים, עיגול, מגע של 48. */
+  .header-action {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    margin: 4px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--secondary-text-color);
+    cursor: pointer;
+    transition: background-color var(--ha-animation-duration-fast, 150ms);
+  }
+
+  .header-action:hover {
+    background: var(--ha-color-fill-neutral-quiet-hover, rgba(127, 127, 127, 0.12));
+  }
+
+  .header-action:focus-visible {
+    outline: 2px solid var(--ha-color-focus, var(--primary-color));
+    outline-offset: 0;
+  }
+
+  .header-main:focus-visible,
   .row:focus-visible {
     outline: 2px solid var(--ha-color-focus, var(--primary-color));
     outline-offset: -2px;
@@ -408,6 +444,26 @@ export const cardStyles = css`
   .cancelled-tag {
     font-weight: var(--ha-font-weight-medium, 500);
     color: var(--ha-color-on-danger-normal, #b30532);
+  }
+
+  /* מתי לצאת מהבית: בולט כשהגיע הזמן, ושקט כשכבר מאוחר מדי. */
+  .tag.leave {
+    font-weight: var(--ha-font-weight-medium, 500);
+    color: var(--primary-text-color);
+  }
+
+  .tag.leave.leave-now {
+    color: var(--it-text-warning);
+  }
+
+  .tag.leave.too-late {
+    font-weight: var(--ha-font-weight-normal, 400);
+    color: var(--secondary-text-color);
+  }
+
+  .row.missed .destination,
+  .row.missed .eta-value {
+    color: var(--secondary-text-color);
   }
 
   .chevron {

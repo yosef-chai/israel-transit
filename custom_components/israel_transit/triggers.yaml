@@ -32,6 +32,19 @@ arrival:
             - before
             - after
 
+leave:
+  target: *stop_target
+  fields:
+    line: *line
+    offset:
+      required: true
+      default:
+        hours: 0
+        minutes: 0
+        seconds: 0
+      selector:
+        duration:
+
 delay:
   target: *stop_target
   fields:

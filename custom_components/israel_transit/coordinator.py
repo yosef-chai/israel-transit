@@ -35,11 +35,16 @@ from .const import (
     CONF_RAIL_DESTINATION,
     CONF_SCAN_INTERVAL,
     CONF_STOP_CODE,
+    CONF_WALK_MINUTES,
     DEFAULT_SCAN_INTERVAL,
     DEPARTED_GRACE,
     DOMAIN,
+    IDLE_POLL_MAX,
+    IDLE_WAKE_LEAD,
     NEW_STOP_INDEX_DELAY,
     ROUTE_TYPE_RAIL,
+    SPARSE_GAP,
+    SPARSE_POLL,
     TIMETABLE_REQUEST_COOLDOWN,
 )
 from .index import GtfsIndex
@@ -72,6 +77,10 @@ class StopData:
     realtime_error: str | None = None
     # מתי הלוח נשלף, ב-UTC. לוח ישן מוגש לפעמים בכוונה, ואז זה מה שמסגיר אותו.
     updated_at: datetime = field(default_factory=dt_util.utcnow)
+    # הנסיעה המתוכננת הבאה, רק כשאין כלום בשעות הקרובות (לילה, שבת, חג).
+    next_service: Arrival | None = None
+    # מתי הלוח יתעדכן שוב, כדי שהכרטיס לא יקרא "ישן" ללוח שמתעדכן לאט בכוונה.
+    refresh_seconds: int = DEFAULT_SCAN_INTERVAL
 
     def upcoming(self, now: datetime | None = None) -> list[Arrival]:
         """The arrivals that have not left yet.
@@ -86,6 +95,10 @@ class StopData:
     def for_line(self, line_name: str, now: datetime | None = None) -> list[Arrival]:
         return [a for a in self.upcoming(now) if a.line_name == line_name]
 
+    def running(self, now: datetime | None = None) -> list[Arrival]:
+        """מה שבאמת עוד יגיע: בלי מה שכבר עבר ובלי נסיעות מבוטלות."""
+        return [a for a in self.upcoming(now) if not a.cancelled]
+
     def as_dict(self, lang: str = "he", now: datetime | None = None) -> dict[str, Any]:
         return {
             "stop": self.stop.as_dict(),
@@ -94,7 +107,27 @@ class StopData:
             "has_realtime": self.has_realtime,
             "realtime_error": self.realtime_error,
             "updated_at": self.updated_at.isoformat(),
+            "next_service": (
+                self.next_service.as_dict(lang, now) if self.next_service else None
+            ),
+            "refresh_seconds": self.refresh_seconds,
         }
+
+
+def poll_interval(base: timedelta, data: StopData, now: datetime) -> timedelta:
+    """כמה לחכות לרענון הבא של תחנה. אף פעם לא פחות מ-``base``.
+
+    בלי שום נסיעה בשעות הקרובות מחכים עד עשר דקות לפני הנסיעה הבאה בלוח
+    הזמנים, ולא יותר מרבע שעה, כדי שגם אוטובוס שאינו בלוח יופיע בסוף. כשהנסיעה
+    הקרובה רחוקה מחצי שעה, חמש דקות מספיקות. לוח ריק בלי לוח זמנים ידוע לא
+    אומר כלום, ולכן נשאר בקצב הרגיל.
+    """
+    rows = data.running(now)
+    if rows:
+        return max(base, SPARSE_POLL) if rows[0].eta - now >= SPARSE_GAP else base
+    if data.next_service is None:
+        return base
+    return max(base, min(data.next_service.eta - now - IDLE_WAKE_LEAD, IDLE_POLL_MAX))
 
 
 class Clients:
@@ -217,6 +250,13 @@ def async_find_coordinator(
     return None
 
 
+@callback
+def async_walk_minutes(hass: HomeAssistant, stop_code: int) -> int:
+    """דקות ההליכה שהוגדרו לתחנה, או 0 לתחנה שלא הוגדרה או בלי זמן הליכה."""
+    coordinator = async_find_coordinator(hass, stop_code)
+    return coordinator.walk_minutes if coordinator is not None else 0
+
+
 async def async_fetch_stop(
     clients: Clients,
     stop_code: int,
@@ -263,7 +303,7 @@ async def async_fetch_stop(
         _LOGGER.debug("No timetable for stop %s: %s", stop_code, err)
         scheduled = []
 
-    return StopData(
+    data = StopData(
         stop=stop,
         arrivals=merge_board(realtime, scheduled, rail, routes, dt_util.utcnow()),
         routes=routes,
@@ -271,6 +311,14 @@ async def async_fetch_stop(
         has_realtime=realtime_error is None,
         realtime_error=realtime_error,
     )
+    # רק לתחנה שלוח הזמנים המלא שלה באינדקס: באחרת לוח ריק לא אומר שאין שירות,
+    # כי האוטובוסים שלה בכלל לא נשמרו.
+    if not data.running() and stop_code in clients.index.indexed_stops:
+        try:
+            data.next_service = await clients.index.async_next_departure(stop_code)
+        except IsraelTransitError as err:
+            _LOGGER.debug("No next service for stop %s: %s", stop_code, err)
+    return data
 
 
 async def _async_live(
@@ -328,18 +376,24 @@ class IsraelTransitCoordinator(DataUpdateCoordinator[StopData]):
         # None until the first read, so the first one is not logged as news.
         self._realtime_ok: bool | None = None
         interval = subentry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+        # הקצב שהמשתמש בחר. update_interval זז ממנו למעלה כשאין מה לראות.
+        self.base_interval = timedelta(seconds=int(interval))
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN} {self.stop_code}",
             config_entry=entry,
-            update_interval=timedelta(seconds=int(interval)),
+            update_interval=self.base_interval,
         )
 
     @property
     def rail_destination(self) -> str | None:
         destination: str | None = self.subentry.data.get(CONF_RAIL_DESTINATION)
         return destination or None
+
+    @property
+    def walk_minutes(self) -> int:
+        return int(self.subentry.data.get(CONF_WALK_MINUTES) or 0)
 
     @callback
     def async_update_listeners(self) -> None:
@@ -355,6 +409,7 @@ class IsraelTransitCoordinator(DataUpdateCoordinator[StopData]):
                 self.clients, self.stop_code, rail_destination=self.rail_destination
             )
         except IsraelTransitError as err:
+            self.update_interval = self.base_interval
             # The index answers throughout a rebuild now, but not through the
             # swap at the end of one, nor through the very first build. A stop
             # curlbus will not answer for cannot be identified without it, and
@@ -376,6 +431,16 @@ class IsraelTransitCoordinator(DataUpdateCoordinator[StopData]):
             ) from err
 
         self._async_log_realtime(data)
+        # נקבע לפני החזרה: DataUpdateCoordinator מתזמן את הרענון הבא אחרי העדכון,
+        # לפי update_interval של אותו רגע.
+        self.update_interval = poll_interval(self.base_interval, data, dt_util.utcnow())
+        data.refresh_seconds = int(self.update_interval.total_seconds())
+        if self.update_interval != self.base_interval:
+            _LOGGER.debug(
+                "Stop %s has nothing due soon; next refresh in %s",
+                self.stop_code,
+                self.update_interval,
+            )
         return data
 
     @callback
