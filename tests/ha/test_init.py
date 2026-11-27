@@ -6,7 +6,7 @@ from datetime import UTC
 from unittest.mock import AsyncMock
 
 import pytest
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
@@ -23,7 +23,7 @@ from custom_components.israel_transit.diagnostics import (
 )
 
 from .common import MockConfigEntry
-from .conftest import STOP, make_arrival
+from .conftest import STOP, make_arrival, stop_subentry
 
 
 def _set_stop_data(
@@ -335,3 +335,28 @@ async def test_untracking_a_line_removes_its_sensors(
     }
     assert "21023_line_36_next_arrival" in remaining
     assert not any("line_91" in unique_id for unique_id in remaining)
+
+
+async def test_a_stop_added_while_the_entry_was_not_loaded_gets_its_timetable(
+    hass: HomeAssistant, loaded_entry: MockConfigEntry, mock_index: AsyncMock
+) -> None:
+    """Regression: adding stops quickly left all but the first out of the index.
+
+    Each new stop reloads the entry, and Home Assistant calls the update
+    listener only while the entry is loaded. A stop added during the reload for
+    the one before it never reached the listener, so nothing asked for its
+    timetable until the daily check. Setting the entry up now asks.
+    """
+    assert await hass.config_entries.async_unload(loaded_entry.entry_id)
+    await hass.async_block_till_done()
+    hass.config_entries.async_add_subentry(
+        loaded_entry, ConfigSubentry(**stop_subentry(20092))
+    )
+    mock_index.async_schedule_refresh.reset_mock()
+
+    assert await hass.config_entries.async_setup(loaded_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert mock_index.async_schedule_refresh.called
+    stop_codes = mock_index.async_schedule_refresh.call_args.args[0]
+    assert 20092 in (stop_codes() if callable(stop_codes) else stop_codes)

@@ -147,6 +147,11 @@ async def async_setup_entry(
     entry.runtime_data = coordinators
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    # Here and not in the update listener: Home Assistant only calls that
+    # listener while the entry is loaded, so a stop added during the reload
+    # for the one before it never reached it, and waited a day for its
+    # timetable. Every stop the entry sets up passes through here.
+    _async_index_check(hass)
     return True
 
 
@@ -197,12 +202,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 async def _async_reload_entry(
     hass: HomeAssistant, entry: IsraelTransitConfigEntry
 ) -> None:
-    """A stop was added, removed or edited; its entities follow from that."""
-    # A stop that was just added has no bus timetable in the index, and the
-    # feed itself has not changed, so the daily check is the only other thing
-    # that would ever go and fetch one. Editing a stop's lines or interval
-    # leaves the set of codes alone and costs one small request.
-    _async_index_check(hass)
+    """A stop was added, removed or edited; its entities follow from that.
+
+    The reload sets the entry up again, which checks the index for the new
+    set of stops (see async_setup_entry).
+    """
     await hass.config_entries.async_reload(entry.entry_id)
 
 
