@@ -14,48 +14,38 @@ export const DIALOG_CLOSED = "israel-transit-dialog-closed";
 // token that /api/brands requires.
 export const BRAND_ICON = `/${DOMAIN}/brand/icon.png`;
 
-// Matches the GTFS route types the backend reports.
-export const MODE_ICONS = {
-  0: "mdi:tram",
-  2: "mdi:train",
-  3: "mdi:bus",
-  5: "mdi:gondola",
-  8: "mdi:taxi",
-  715: "mdi:bus-clock",
+// The one place these colours are written down: styles.js turns the light ones
+// into the --it-mode-* custom properties for badges (white text on them is at
+// least 4.5:1), and the map, which paints on a canvas no CSS variable reaches,
+// takes the pair for its theme. Every colour is at least 3:1 against the map
+// background and its streets in that theme.
+export const MODE_COLORS = {
+  0: ["#7b4fd1", "#b39ddb"], // light rail
+  2: ["#1e6fbf", "#64b5f6"], // Israel Railways
+  3: ["#2f7d4f", "#66bb6a"], // bus
+  5: ["#a3581a", "#ffb74d"], // cable car
+  8: ["#8a7320", "#e6c84a"], // shared taxi
+  715: ["#4a6572", "#90a4ae"], // flexible route
 };
 
-// The one place these colours are written down: styles.js turns them into the
-// --it-mode-* custom properties, and the map needs them as literal values
-// because Leaflet paints on a canvas that no CSS variable reaches.
-export const MODE_HEX = {
-  0: "#7b4fd1", // light rail
-  2: "#1e6fbf", // Israel Railways
-  3: "#2f7d4f", // bus
-  5: "#b5651d", // cable car
-  8: "#a3892c", // shared taxi
-  715: "#4a6572",
-};
+export const UNKNOWN_COLORS = ["#0277bd", "#4fc3f7"];
 
-export const UNKNOWN_HEX = "#03a9f4";
+// The two things the map draws that are not a transport mode.
+export const VEHICLE_COLORS = ["#c62828", "#ff6e6e"];
+export const MY_STOP_COLORS = ["#9c6200", "#ffb300"];
 
-// The two things the map draws that are not a transport mode. Neither collides
-// with a mode colour, so a glance at the map is enough to tell them apart.
-export const VEHICLE_HEX = "#db4437";
-export const MY_STOP_HEX = "#f0a202";
+const known = (routeType) => routeType != null && MODE_COLORS[routeType] != null;
 
-export const modeIcon = (routeType) => MODE_ICONS[routeType] ?? "mdi:bus";
-
+/** A mode's colour as a CSS variable, for badges. */
 export const modeColor = (routeType) =>
-  routeType != null && MODE_ICONS[routeType]
-    ? `var(--it-mode-${routeType})`
-    : "var(--it-mode-unknown)";
+  known(routeType) ? `var(--it-mode-${routeType})` : "var(--it-mode-unknown)";
 
-export const modeHex = (routeType) => MODE_HEX[routeType] ?? UNKNOWN_HEX;
+/** A mode's literal colour for the map, in the light or dark theme. */
+export const modeMapColor = (routeType, dark) =>
+  (known(routeType) ? MODE_COLORS[routeType] : UNKNOWN_COLORS)[dark ? 1 : 0];
 
 export const modeLabel = (hass, routeType) =>
-  routeType != null && MODE_ICONS[routeType]
-    ? localize(hass, `mode_${routeType}`)
-    : "";
+  known(routeType) ? localize(hass, `mode_${routeType}`) : "";
 
 /** Whole minutes from now until an ISO timestamp; never negative. */
 export const minutesUntil = (iso, now = Date.now()) => {
@@ -116,17 +106,6 @@ export const errorMessage = (hass, err) => {
   return key ? localize(hass, key) : localize(hass, "errorGeneric");
 };
 
-/**
- * The dialog element to render details in.
- *
- * ha-adaptive-dialog is the current component -- a dialog on desktop, a bottom
- * sheet on small screens -- and arrived in Home Assistant 2026.3. Both it and
- * ha-dialog take an `open` property, a `header-title` attribute and fire
- * `closed`, so falling back keeps older installs working with the same markup.
- */
-export const dialogTag = () =>
-  customElements.get("ha-adaptive-dialog") ? "ha-adaptive-dialog" : "ha-dialog";
-
 export const fireEvent = (node, type, detail = {}) => {
   const event = new CustomEvent(type, {
     detail,
@@ -137,20 +116,9 @@ export const fireEvent = (node, type, detail = {}) => {
   return event;
 };
 
-/**
- * Make <ha-map> available, and say whether it worked.
- *
- * ha-map ships with Home Assistant but is only registered once something pulls
- * the map card's module in, so we ask for one. Building it is the side effect
- * we want; whether that particular config is one the map card likes is not.
- */
-export const loadHaMap = async () => {
-  if (customElements.get("ha-map")) return true;
-  try {
-    const helpers = await window.loadCardHelpers?.();
-    await helpers?.createCardElement({ type: "map", entities: ["zone.home"] });
-  } catch {
-    // The import already happened; a rejected config does not undo it.
-  }
-  return !!customElements.get("ha-map");
-};
+/** Whether the user asked the system for less motion. */
+export const reducedMotion = () =>
+  window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+
+/** Whether Home Assistant is showing its dark theme. */
+export const isDark = (hass) => Boolean(hass?.themes?.darkMode);

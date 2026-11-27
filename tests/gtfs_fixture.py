@@ -27,7 +27,7 @@ ROUTES = """route_id,agency_id,route_short_name,route_long_name,route_desc,route
 TRIPS = """route_id,service_id,trip_id,trip_headsign,direction_id,shape_id,wheelchair_accessible
 34447,1,tram-a,בת ים_הקוממיות,0,1,1
 34447,1,tram-b,בת ים_הקוממיות,0,1,1
-34448,1,tram-c,פתח תקווה_קרית אריה,1,1,1
+34448,1,tram-c,פתח תקווה_קרית אריה,1,3,1
 960,1,bus-a,אור יהודה_מסוף,0,2,1
 960,1,bus-b,אור יהודה_מסוף,0,2,1
 """
@@ -58,6 +58,20 @@ bus-a,12:15:00,12:15:00,1,2,0,0
 bus-b,12:45:00,12:45:00,3,1,0,1
 """
 
+# Shape 3 is shape 1 run backwards. Shape 2 is out of sequence order, as the
+# feed allows, and carries a (0, 0) point the build has to drop.
+SHAPES = """shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence
+1,32.010000,34.750000,1
+1,32.100000,34.870000,2
+1,32.072666,34.793390,3
+3,32.072666,34.793390,1
+3,32.100000,34.870000,2
+3,32.010000,34.750000,3
+2,32.010000,34.750000,30
+2,0,0,20
+2,32.072666,34.793390,10
+"""
+
 MEMBERS = {
     "agency.txt": AGENCY,
     "routes.txt": ROUTES,
@@ -65,13 +79,21 @@ MEMBERS = {
     "stops.txt": STOPS,
     "calendar.txt": CALENDAR,
     "stop_times.txt": STOP_TIMES,
+    "shapes.txt": SHAPES,
 }
 
 
-def write_feed(directory: Path) -> dict[str, Path]:
-    """Write each member exactly as the downloader leaves it: raw deflate."""
+def write_feed(
+    directory: Path, members: dict[str, str | None] | None = None
+) -> dict[str, Path]:
+    """Write each member exactly as the downloader leaves it: raw deflate.
+
+    ``members`` replaces some of them; None leaves one out of the feed.
+    """
     files = {}
-    for name, text in MEMBERS.items():
+    for name, text in {**MEMBERS, **(members or {})}.items():
+        if text is None:
+            continue
         compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
         payload = "﻿" + text.replace("\n", "\r\n")
         blob = compressor.compress(payload.encode("utf-8")) + compressor.flush()

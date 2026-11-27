@@ -15,6 +15,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.util import dt as dt_util
 
 from .api import IsraelTransitError, parse_dt
 from .const import (
@@ -146,7 +147,14 @@ async def ws_stop(
         return
     if data.realtime_error and not data.arrivals:
         clients.async_request_timetable(msg["stop_code"])
-    connection.send_result(msg["id"], data.as_dict(hass.config.language))
+    connection.send_result(
+        msg["id"],
+        {
+            **data.as_dict(hass.config.language),
+            # שעון השרת, כדי שהכרטיס יחשב גיל של מיקום רכב בלי לסמוך על שעון הדפדפן.
+            "server_time": dt_util.utcnow().isoformat(),
+        },
+    )
 
 
 @websocket_api.websocket_command(
@@ -183,16 +191,31 @@ async def ws_route_stops(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """A line's ordered stop sequence -- the vehicle detail view.
+    """A line's ordered stop sequence and street path -- the vehicle detail view.
 
     Stop times are stored as offsets from the start of a run, so passing the
     tracked vehicle's departure time turns them into times for that vehicle
-    rather than for whichever sample trip was indexed.
+    rather than for whichever sample trip was indexed. ``index`` is when the
+    index was built, which lets the card cache the path until it changes.
     """
+    index = _clients(hass).index
     try:
-        stops = await _clients(hass).index.async_route_stops(msg["line_ref"])
+        stops = await index.async_route_stops(msg["line_ref"])
+        shape = await index.async_route_shape(msg["line_ref"])
     except IsraelTransitError as err:
         connection.send_error(msg["id"], "lookup_failed", str(err))
         return
     departed = parse_dt(msg.get("departed"))
-    connection.send_result(msg["id"], [stop.as_dict(departed) for stop in stops])
+    connection.send_result(
+        msg["id"],
+        {
+            "stops": [stop.as_dict(departed) for stop in stops],
+            # חמש ספרות אחרי הנקודה הן כמטר, ומקצרות את ההודעה בחצי.
+            "shape": (
+                [[round(lat, 5), round(lon, 5)] for lat, lon in shape]
+                if shape
+                else None
+            ),
+            "index": index.built,
+        },
+    )

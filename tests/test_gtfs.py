@@ -211,7 +211,8 @@ def index() -> sqlite3.Connection:
         "INSERT INTO stops VALUES (35962,'הקוממיות','בת ים',32.01,34.75,'אנה פרנק')"
     )
     connection.executemany(
-        "INSERT INTO routes VALUES (?,?,?,?,?,?)",
+        "INSERT INTO routes (route_id, short_name, long_name, agency, route_type,"
+        " headsign) VALUES (?,?,?,?,?,?)",
         [
             (34447, "1", "א<->ב-1#", "תבל", "0", "בת ים_הקוממיות"),
             (960, "36", "ג<->ד-1#", "מטרופולין", "3", ""),

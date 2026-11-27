@@ -60,7 +60,7 @@
 1. לוחצים על הכפתור, או נכנסים ל**הגדרות ← מכשירים ושירותים ← הוספת שילוב ← Israel Transit**, ומאשרים.
 2. בעמוד של Israel Transit לוחצים **הוספת תחנה**, מחפשים את התחנה ובוחרים אותה.
 
-בפעם הראשונה האינטגרציה מורידה את לוח הזמנים של משרד התחבורה (כ-90MB) ובונה ממנו קובץ מקומי. זה לוקח כמה שניות במחשב רגיל וכמה דקות ב-Raspberry Pi. עד שזה מסתיים מוצג מסך התקדמות.
+בפעם הראשונה האינטגרציה מורידה את לוח הזמנים של משרד התחבורה (כ-150MB) ובונה ממנו קובץ מקומי. זה לוקח כמה שניות במחשב רגיל וכמה דקות ב-Raspberry Pi. עד שזה מסתיים מוצג מסך התקדמות.
 
 כל תחנה מקבלת מכשיר משלה. את ההגדרות שלה משנים ב-**⋮ ← הגדרה מחדש**:
 
@@ -135,7 +135,9 @@ order: lines
 
 </div>
 
-במפה של מסלול הקו, הטבעת הכתומה היא התחנה שלך והטבעת האדומה היא הרכב. מיקום חי יש רק לאוטובוסים ולמוניות שירות.
+במפה של מסלול הקו, הקו מצויר לאורך הרחובות שהוא עובר בהם, והחלק שהרכב כבר עבר מופיע בהיר יותר. הסיכה היא התחנה שלך, והעיגול עם מספר הקו הוא הרכב. מיקום שלא התעדכן יותר משתי דקות מופיע באפור, עם הזמן שעבר. מיקום חי יש רק לאוטובוסים ולמוניות שירות. כשאין במשרד התחבורה מסלול לקו, הוא מצויר בקו מקווקו ישר בין התחנות.
+
+המפה משתמשת באריחים של [VersaTiles][versatiles] מנתוני OpenStreetMap, ונטענת רק כשפותחים מסלול. אם הרשת חוסמת את `tiles.versatiles.org`, רשימת התחנות ממשיכה לעבוד גם בלי המפה.
 
 ## אוטומציות
 
@@ -295,7 +297,7 @@ curlbus הוא שירות קהילתי חינמי. כדי לא להעמיס על
 - **לוח זמנים לאוטובוסים נשמר רק לתחנות שהוגדרו.** לתחנה אחרת (למשל בכרטיס או ב-`get_arrivals`) יש רק זמן אמת.
 - **זמן האמת תלוי ב-curlbus.** כשהוא לא זמין מוצג לוח הזמנים.
 - **רכבת ישראל** מדווחת עיכובים לפי מסלול, ולכן צריך תחנת יעד. המפתח של rail.co.il הוא המפתח הציבורי מהאתר שלהם, והוא עלול להשתנות.
-- **הורדה ראשונה** של כ-90MB, ועוד מקום זמני בדיסק בזמן הבנייה.
+- **הורדה** של כ-150MB בכל עדכון של לוח הזמנים, ועוד מקום זמני בדיסק בזמן הבנייה.
 - **לוחות במצב YAML.** אי אפשר לרשום בהם משאב אוטומטית. מוסיפים את `/israel_transit/israel-transit-card.js` כמשאב מסוג JavaScript module (הכתובת המדויקת מופיעה בלוג).
 
 ## פתרון תקלות
@@ -353,6 +355,7 @@ python -m pytest
 python -m pytest -c pytest-ha.ini
 python -m mypy
 python -m ruff check custom_components tests
+node --test "tests/js/*.test.mjs"
 ```
 
 </div>
@@ -361,7 +364,7 @@ python -m ruff check custom_components tests
 
 ## קרדיטים
 
-הנתונים באדיבות משרד התחבורה, [curlbus][curlbus] של elad661 ורכבת ישראל.
+הנתונים באדיבות משרד התחבורה, [curlbus][curlbus] של elad661 ורכבת ישראל. המפה: [MapLibre GL JS][maplibre] (BSD-3), אריחים של [VersaTiles][versatiles] ונתונים של © [OpenStreetMap][osm]. האייקונים מ-[Material Design Icons][mdi] (Apache 2.0).
 
 ## רישיון
 
@@ -370,6 +373,10 @@ python -m ruff check custom_components tests
 </div>
 
 [hacs]: https://hacs.xyz
+[maplibre]: https://maplibre.org
+[versatiles]: https://versatiles.org
+[osm]: https://www.openstreetmap.org/copyright
+[mdi]: https://pictogrammers.com/library/mdi/
 [hacs-badge]: https://img.shields.io/badge/HACS-Custom-41BDF5.svg
 [release]: https://github.com/yosef-chai/israel-transit/releases/latest
 [release-badge]: https://img.shields.io/github/v/release/yosef-chai/israel-transit

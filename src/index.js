@@ -1,7 +1,10 @@
 import { IsraelTransitCard } from "./card.js";
-import { IsraelTransitCardEditor } from "./editor.js";
+import { IsraelTransitDialog } from "./dialog.js";
 import { IsraelTransitRouteDialog, IsraelTransitStopDialog } from "./dialogs.js";
+import { IsraelTransitCardEditor } from "./editor.js";
 import { localize } from "./localize.js";
+import { IsraelTransitMap } from "./map.js";
+import { DOMAIN } from "./util.js";
 
 const define = (tag, klass) => {
   if (!customElements.get(tag)) customElements.define(tag, klass);
@@ -11,6 +14,8 @@ define("israel-transit-card", IsraelTransitCard);
 define("israel-transit-card-editor", IsraelTransitCardEditor);
 define("israel-transit-stop-dialog", IsraelTransitStopDialog);
 define("israel-transit-route-dialog", IsraelTransitRouteDialog);
+define("israel-transit-dialog", IsraelTransitDialog);
+define("israel-transit-map", IsraelTransitMap);
 
 // The card picker reads this. Labels follow the browser language, since the
 // picker renders before any hass object reaches the card.
@@ -24,6 +29,15 @@ if (!window.customCards.some((card) => card.type === "israel-transit-card")) {
     description: localize(lang, "description"),
     preview: true,
     documentationURL: "https://github.com/yosef-chai/israel-transit",
+    // Home Assistant 2026.6+ offers the card in the picker for an entity it
+    // fits. Only this integration's stop entities qualify; anything else
+    // returns null, so the picker is not crowded for everyone else.
+    getEntitySuggestion: (hass, entityId) => {
+      if (hass?.entities?.[entityId]?.platform !== DOMAIN) return null;
+      const stopCode = hass.states?.[entityId]?.attributes?.stop_code;
+      if (!stopCode) return null;
+      return { config: { type: "custom:israel-transit-card", stop_code: Number(stopCode) } };
+    },
   });
 }
 

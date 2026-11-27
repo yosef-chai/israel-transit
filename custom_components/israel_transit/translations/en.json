@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "description": "Sets up Israel Transit and builds a local copy of the Ministry of Transport timetable, which downloads about 90 MB once. You then add your stops one by one."
+        "description": "Sets up Israel Transit and builds a local copy of the Ministry of Transport timetable, which downloads about 150 MB once. You then add your stops one by one."
       }
     },
     "abort": {
@@ -58,16 +58,16 @@
         }
       },
       "error": {
-        "cannot_connect": "Could not read the local timetable index.",
-        "no_stops_found": "No stop matched that search."
+        "cannot_connect": "Could not read the local timetable. Try again, and if it keeps failing, rebuild it with the Rebuild timetable action.",
+        "no_stops_found": "No stop matched that search. Try fewer words, or the code printed on the stop sign."
       },
       "abort": {
         "already_configured": "This stop is already set up.",
         "reconfigure_successful": "The stop was updated.",
-        "index_unavailable": "The timetable index could not be built, so there are no stops to search: {error}"
+        "index_unavailable": "The local timetable could not be built, so there are no stops to search. Check the network connection, then add the stop again.\n\n{error}"
       },
       "progress": {
-        "building_index": "Building the local timetable from the Ministry of Transport feed. This downloads about 90 MB and runs once."
+        "building_index": "Building the local timetable from the Ministry of Transport feed. This downloads about 150 MB and runs once."
       }
     }
   },
@@ -149,7 +149,7 @@
     },
     "rebuild_timetable": {
       "name": "Rebuild timetable",
-      "description": "Downloads the Ministry of Transport timetable again and rebuilds the local copy. Takes a few minutes and about 90 MB."
+      "description": "Downloads the Ministry of Transport timetable again and rebuilds the local copy. Takes a few minutes and about 150 MB."
     }
   },
   "exceptions": {
@@ -157,7 +157,7 @@
       "message": "Could not read arrivals for stop {stop_code}: {error}"
     },
     "unknown_stop": {
-      "message": "Stop {stop_code} does not exist: {error}"
+      "message": "Stop {stop_code} does not exist. Check the code printed on the stop sign. {error}"
     },
     "stop_update_failed": {
       "message": "Could not update stop {stop_code}: {error}"
@@ -166,7 +166,7 @@
       "message": "None of the configured stops could be read. Retrying."
     },
     "invalid_target": {
-      "message": "The target is not an Israel Transit stop that is set up."
+      "message": "The target is not a stop set up in Israel Transit. Choose one of your stops."
     },
     "index_unavailable": {
       "message": "The local timetable is not built yet. Try again once it is."
@@ -175,10 +175,10 @@
       "message": "The stop search failed: {error}"
     },
     "rebuild_in_progress": {
-      "message": "The timetable is already being rebuilt."
+      "message": "The timetable is already being rebuilt. Wait for it to finish."
     },
     "rebuild_failed": {
-      "message": "Rebuilding the timetable failed: {error}"
+      "message": "Rebuilding the timetable failed. Check the network connection and free disk space, then try again. {error}"
     }
   },
   "issues": {
@@ -188,7 +188,7 @@
         "step": {
           "confirm": {
             "title": "Rebuild the timetable",
-            "description": "Israel Transit could not build its local copy of the Ministry of Transport timetable, so light rail, the cable lines and trains have no times to show. Real-time buses are unaffected.\n\nSubmit to download the timetable again now (about 90 MB). This can take a few minutes.\n\n{error}"
+            "description": "Israel Transit could not build its local copy of the Ministry of Transport timetable, so light rail, the cable lines and trains have no times to show. Real-time buses are unaffected.\n\nSubmit to download the timetable again now (about 150 MB). This can take a few minutes.\n\n{error}"
           }
         },
         "progress": {

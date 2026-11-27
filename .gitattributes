@@ -1,2 +1,5 @@
 * text=auto eol=lf
 *.png binary
+# Built and vendored files: kept out of language stats and collapsed in diffs.
+custom_components/israel_transit/www/vendor/** linguist-vendored
+custom_components/israel_transit/www/*.js linguist-generated

@@ -10,7 +10,9 @@
       :root {
         --primary-text-color: #212121;
         --secondary-text-color: #727272;
-        --primary-color: #03a9f4;
+        --primary-color: #009ac7;
+        --info-color: #039be5;
+        --ha-color-focus: #8a8a8a;
         --success-color: #43a047;
         --warning-color: #ffa600;
         --error-color: #db4437;
@@ -30,6 +32,7 @@
         --ha-color-surface-low: rgba(255, 255, 255, 0.08);
         --ha-color-surface-lower: rgba(255, 255, 255, 0.05);
         --primary-background-color: #111213;
+        --ha-color-fill-neutral-quiet-resting: rgba(255, 255, 255, 0.08);
       }
       body {
         margin: 0;
@@ -155,160 +158,6 @@
         },
       );
 
-      define(
-        "ha-icon",
-        class extends HTMLElement {
-          connectedCallback() {
-            this.style.cssText =
-              "display:inline-block;width:20px;height:20px;flex:0 0 auto;" +
-              "border-radius:50%;background:currentColor;opacity:.45";
-          }
-        },
-      );
-
-      class FakeDialog extends HTMLElement {
-        set open(value) {
-          this.style.display = value ? "block" : "none";
-          if (value) this._render();
-        }
-        _render() {
-          if (this._built) return;
-          this._built = true;
-          this.style.cssText =
-            "position:fixed;inset:auto 0 0 0;max-height:80vh;overflow:auto;z-index:9;" +
-            "margin:auto;max-width:560px;background:var(--card-background-color);" +
-            "border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,.2);padding:16px";
-          const header = document.createElement("div");
-          header.style.cssText =
-            "display:flex;justify-content:space-between;align-items:start;margin-block-end:12px";
-          header.innerHTML =
-            `<div><div style="font-size:1.25rem">${this.getAttribute("header-title") || ""}</div>` +
-            `<div style="font-size:.8125rem;color:var(--secondary-text-color)">${
-              this.getAttribute("header-subtitle") || ""
-            }</div></div>`;
-          const close = document.createElement("button");
-          close.textContent = "×";
-          close.style.cssText =
-            "border:none;background:none;font-size:1.5rem;cursor:pointer;color:inherit";
-          close.onclick = () => this.dispatchEvent(new CustomEvent("closed"));
-          header.appendChild(close);
-          this.prepend(header);
-        }
-      }
-      define("ha-adaptive-dialog", FakeDialog);
-      define("ha-dialog", class extends FakeDialog {});
-
-      define(
-        "ha-textfield",
-        class extends HTMLElement {
-          connectedCallback() {
-            const input = document.createElement("input");
-            input.placeholder = this.label || this.getAttribute("label") || "";
-            input.style.cssText =
-              "width:100%;padding:10px;border-radius:8px;box-sizing:border-box;" +
-              "border:1px solid var(--divider-color);background:transparent;color:inherit";
-            input.addEventListener("input", (e) => {
-              this.value = e.target.value;
-            });
-            this.appendChild(input);
-          }
-        },
-      );
-
-      define(
-        "ha-button",
-        class extends HTMLElement {
-          connectedCallback() {
-            this.style.cssText =
-              "cursor:pointer;padding:6px 10px;border-radius:8px;" +
-              "border:1px solid var(--divider-color);font-size:.875rem";
-          }
-        },
-      );
-
-      define(
-        "ha-form",
-        class extends HTMLElement {
-          connectedCallback() {
-            this.style.cssText =
-              "display:block;padding:10px;border:1px dashed var(--divider-color);" +
-              "border-radius:8px;font-size:.8125rem;color:var(--secondary-text-color)";
-            queueMicrotask(() => {
-              const flatten = (schema) =>
-                (schema || []).flatMap((s) => (s.schema ? flatten(s.schema) : [s]));
-              const names = flatten(this.schema)
-                .map((s) => {
-                  const value = this.data?.[s.name];
-                  const label = this.computeLabel?.(s) ?? s.name;
-                  return typeof value === "boolean"
-                    ? `${label}=${value ? "on" : "off"}`
-                    : `${label}=${value ?? "-"}`;
-                })
-                .filter(Boolean);
-              this.textContent = `ha-form: ${names.join(" · ")}`;
-            });
-          }
-        },
-      );
-
-      // A stand-in for ha-map: plots the same paths on an SVG so the route
-      // line, the vehicle point and the framing can all be seen.
-      define(
-        "ha-map",
-        class extends HTMLElement {
-          constructor() {
-            super();
-            this.leafletMap = { stub: true };
-          }
-          set paths(value) {
-            this._paths = value;
-            this._draw();
-          }
-          fitBounds(points) {
-            this._bounds = points;
-            this._draw();
-          }
-          _draw() {
-            const paths = this._paths || [];
-            const all = paths.flatMap((p) => p.points.map((pt) => pt.point));
-            if (!all.length) return;
-            const lats = all.map((p) => p[0]);
-            const lons = all.map((p) => p[1]);
-            const [y0, y1] = [Math.min(...lats), Math.max(...lats)];
-            const [x0, x1] = [Math.min(...lons), Math.max(...lons)];
-            const at = (p) => [
-              ((p[1] - x0) / (x1 - x0 || 1)) * 260 + 20,
-              200 - ((p[0] - y0) / (y1 - y0 || 1)) * 160,
-            ];
-            const draw = paths
-              .map((path) => {
-                const pts = path.points.map((pt) => at(pt.point));
-                const line =
-                  pts.length > 1
-                    ? `<polyline points="${pts.map((p) => p.join(",")).join(" ")}"
-                         fill="none" stroke="${path.color}" stroke-width="3"/>`
-                    : "";
-                const dots = pts
-                  .map(
-                    (p) =>
-                      `<circle cx="${p[0]}" cy="${p[1]}" r="${pts.length > 1 ? 4 : 8}"
-                        fill="${path.color}"/>`,
-                  )
-                  .join("");
-                return line + dots;
-              })
-              .join("");
-            this.style.cssText =
-              "display:block;background:var(--ha-color-surface-low);position:relative";
-            this.innerHTML =
-              `<svg viewBox="0 0 300 220" style="width:100%;height:100%">${draw}</svg>` +
-              `<span style="position:absolute;inset-block-start:4px;inset-inline-start:8px;` +
-              `font-size:.6875rem;color:var(--secondary-text-color)">` +
-              `ha-map · fit ${this._bounds ? this._bounds.length : 0} pts</span>`;
-          }
-        },
-      );
-
       // --- captured fixtures ------------------------------------------------
       const iso = (minutesFromNow) =>
         new Date(Date.now() + minutesFromNow * 60000).toISOString();
@@ -325,17 +174,20 @@
           },
           has_realtime: true,
           realtime_error: null,
+          server_time: iso(0),
           arrivals: [
             {
               line_name: "36", line_ref: "960", destination: "מסוף אור יהודה",
               operator: "מטרופולין", route_type: "3", is_realtime: true,
               eta: iso(0), vehicle_lat: 32.0739, vehicle_lon: 34.7837,
+              vehicle_ref: "1001", vehicle_seen: iso(-0.5),
               departed: iso(-22), platform: null, delay_minutes: null,
             },
             {
               line_name: "91", line_ref: "16352", destination: "מסוף הטייסים",
               operator: "מטרופולין", route_type: "3", is_realtime: true,
-              eta: iso(4), vehicle_lat: 32.06, vehicle_lon: 34.79,
+              eta: iso(4), vehicle_lat: 32.0652, vehicle_lon: 34.7768,
+              vehicle_ref: "1002", vehicle_seen: iso(-0.3),
               departed: iso(-14), platform: null, delay_minutes: null,
             },
             {
@@ -404,13 +256,28 @@
         { sequence: 5, code: 21040, name: "מסוף אור יהודה", city: "אור יהודה", lat: 32.021, lon: 34.854, offset_seconds: 2580 },
       ];
 
-      const routeStops = (departed) =>
-        ROUTE_PATTERN.map((stop) => ({
+      // A path that turns corners between stops, the way a real one does.
+      const SHAPE = ROUTE_PATTERN.flatMap((stop, i) => {
+        const next = ROUTE_PATTERN[i + 1];
+        if (!next) return [[stop.lat, stop.lon]];
+        return [
+          [stop.lat, stop.lon],
+          [stop.lat, (stop.lon + next.lon) / 2],
+          [(stop.lat + next.lat) / 2, (stop.lon + next.lon) / 2],
+          [(stop.lat + next.lat) / 2, next.lon],
+        ];
+      });
+
+      const routeStops = (departed, withShape = true) => ({
+        stops: ROUTE_PATTERN.map((stop) => ({
           ...stop,
           arrival_time: departed
             ? new Date(Date.parse(departed) + stop.offset_seconds * 1000).toISOString()
             : null,
-        }));
+        })),
+        shape: withShape ? SHAPE : null,
+        index: "preview",
+      });
 
       const SEARCH = [
         { code: 21023, name: "ת. רכבת השלום", city: "תל אביב יפו", street: "גבעת התחמושת" },
@@ -421,6 +288,7 @@
       const hass = {
         locale: { language: "he" },
         language: "he",
+        themes: { darkMode: false },
         states: {},
         callWS: async (msg) => {
           await new Promise((r) => setTimeout(r, 60));
@@ -432,13 +300,14 @@
           if (msg.type.endsWith("/stop_routes")) {
             return FIXTURES[msg.stop_code]?.routes ?? [];
           }
-          if (msg.type.endsWith("/route_stops")) return routeStops(msg.departed);
+          if (msg.type.endsWith("/route_stops")) {
+            // Line 480 has no shape in the feed: the route is drawn straight.
+            return routeStops(msg.departed, msg.line_ref !== "7020");
+          }
           if (msg.type.endsWith("/search_stops")) return SEARCH;
           throw new Error(`unhandled ${msg.type}`);
         },
       };
-
-      window.loadCardHelpers = async () => null;
 
       // --- mount ------------------------------------------------------------
       await import("../custom_components/israel_transit/www/israel-transit-card.js");
@@ -483,14 +352,26 @@
         document.getElementById(hostId).appendChild(dialog);
         dialog.open = true;
         await dialog.updateComplete;
-        // Lay the stub dialog out in the page rather than over it, so its map,
-        // legend and timeline can be seen beside everything else.
-        const sheet = dialog.shadowRoot.querySelector("ha-adaptive-dialog, ha-dialog");
-        Object.assign(sheet.style, {
-          display: "block",
+        // Shown in the page rather than over it (a non-modal dialog, laid out
+        // in place), so its map, status and timeline sit beside the cards.
+        const shell = dialog.shadowRoot.querySelector("israel-transit-dialog");
+        await shell.updateComplete;
+        const native = shell.shadowRoot.querySelector("dialog");
+        // Out of the top layer without the dialog hearing about it: its own
+        // close handler would take the content down with it.
+        native.addEventListener("close", (ev) => ev.stopImmediatePropagation(), {
+          capture: true,
+          once: true,
+        });
+        native.close();
+        native.show();
+        native.classList.add("shown");
+        Object.assign(native.style, {
           position: "static",
+          width: "100%",
           maxHeight: "none",
-          inset: "auto",
+          margin: "0",
+          boxShadow: "0 2px 6px rgba(0,0,0,.14)",
         });
         return dialog;
       };
@@ -702,22 +583,12 @@
         ed2.setConfig({ type: "custom:israel-transit-card", stop_code: 21023 });
         document.body.appendChild(ed2);
         await ed2.updateComplete;
-        ed2.shadowRoot.querySelector("ha-form")?.dispatchEvent(
-          new CustomEvent("value-changed", {
-            detail: {
-              value: {
-                max_arrivals: 6,
-                max_lines: 0,
-                order: "time",
-                show_header: true,
-                show_city: true,
-                show_clock: true,
-                show_map: true,
-                title: "",
-              },
-            },
-          }),
-        );
+        const clockSwitch = ed2.shadowRoot.querySelector("#it-show_clock");
+        if (!clockSwitch) failures.push("the editor has no clock switch");
+        else {
+          clockSwitch.checked = true;
+          clockSwitch.dispatchEvent(new Event("change"));
+        }
         const want = { type: "custom:israel-transit-card", stop_code: 21023, show_clock: true };
         if (JSON.stringify(emitted) !== JSON.stringify(want)) {
           failures.push(`the editor wrote ${JSON.stringify(emitted)}`);
@@ -732,8 +603,16 @@
       };
       await selfChecks();
 
-      document.getElementById("theme").onclick = () =>
-        document.body.classList.toggle("dark");
+      document.getElementById("theme").onclick = () => {
+        const dark = document.body.classList.toggle("dark");
+        const next = { ...hass, themes: { darkMode: dark } };
+        Object.assign(hass, next);
+        for (const el of document.querySelectorAll(
+          "israel-transit-card, israel-transit-route-dialog, israel-transit-stop-dialog",
+        )) {
+          el.hass = { ...next };
+        }
+      };
       document.getElementById("dir").onclick = () => {
         const html = document.documentElement;
         html.dir = html.dir === "rtl" ? "ltr" : "rtl";

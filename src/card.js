@@ -1,14 +1,17 @@
 import { LitElement, html, nothing } from "lit";
 
+import { ICONS, icon, modePath } from "./icons.js";
 import { localize } from "./localize.js";
+import { clockOffset } from "./map-geometry.js";
 import { cardStyles, sharedStyles } from "./styles.js";
 import {
   DOMAIN,
   errorMessage,
   formatClock,
+  isDark,
   minutesUntil,
   modeColor,
-  modeIcon,
+  modeLabel,
 } from "./util.js";
 
 // The backend answers every stop from a shared 60 s cache (or straight from a
@@ -64,14 +67,27 @@ export class IsraelTransitCard extends LitElement {
   /**
    * Home Assistant assigns this on every state change in the whole instance,
    * which on a busy system is several times a second. Nothing the card renders
-   * follows from it beyond the language and the connection, so it is held as a
-   * plain field: as a reactive property it would re-render every card on screen
-   * every time any unrelated entity changed.
+   * follows from it but the language, the time settings and the theme, so it
+   * is a plain field that asks for a render only when one of those changes:
+   * as a reactive property it would re-render every card on screen whenever
+   * any unrelated entity changed, and as a bare field it missed the user
+   * switching language or turning on dark mode.
    */
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
     if (hass?.connection !== this._connection) this._watch(hass?.connection);
+    const look = [
+      hass?.language,
+      hass?.locale?.language,
+      hass?.locale?.time_format,
+      hass?.locale?.time_zone,
+      isDark(hass),
+    ].join("|");
+    if (look !== this._look) {
+      this._look = look;
+      this.requestUpdate();
+    }
     if (first) this._refresh();
   }
 
@@ -183,6 +199,9 @@ export class IsraelTransitCard extends LitElement {
       // and the card goes on showing the stop the user just replaced, which
       // looks exactly like the change having been ignored.
       if (asked !== Number(this._config?.stop_code)) return;
+      // Positions are aged on the server's clock, so a phone whose clock is
+      // off still knows how old one is.
+      this._clockOffset = clockOffset(data.server_time, Date.now());
       this._data = data;
       this._error = null;
       this._followVehicle();
@@ -256,37 +275,68 @@ export class IsraelTransitCard extends LitElement {
   render() {
     if (!this._config) return nothing;
     if (!this._config.stop_code) {
-      return html`<ha-card
-        ><div class="empty">${this._t("editorNoStop")}</div></ha-card
-      >`;
+      return html`<ha-card>
+        ${this._renderEmpty(ICONS.busStop, this._t("editorNoStop"), this._t("editorSearch"))}
+      </ha-card>`;
     }
 
     const stop = this._data?.stop;
     // _tick is read so departed rows drop off, and countdowns move, on time.
     void this._tick;
     const arrivals = this._data ? this._arrivals : [];
+    const stale = Boolean(this._error && this._data);
 
     return html`
       <ha-card>
         ${this._config.show_header === false ? nothing : this._renderHeader(stop)}
-        ${this._error && this._data
-          ? html`<div class="stale" role="status">
-              <ha-icon icon="mdi:cloud-alert-outline"></ha-icon>
-              <span>${this._t("staleData")}</span>
+        ${stale
+          ? html`<div class="notice">
+              <div class="alert warning" role="status">
+                ${icon(ICONS.offline, { size: 18 })}<span>${this._t("staleData")}</span>
+              </div>
             </div>`
           : nothing}
-        <div class="rows">
+        <div
+          class="rows ${stale ? "stale" : ""}"
+          aria-busy=${!this._data && !this._error ? "true" : "false"}
+        >
           ${!this._data
             ? this._error
-              ? html`<div class="error" role="alert">${this._error}</div>`
-              : html`<div class="empty">${this._t("loading")}</div>`
+              ? html`<div class="notice">
+                  <div class="alert error" role="alert">
+                    ${icon(ICONS.alert, { size: 18 })}<span>${this._error}</span>
+                  </div>
+                </div>`
+              : this._renderSkeleton()
             : arrivals.length === 0
-              ? html`<div class="empty">${this._emptyMessage()}</div>`
+              ? this._renderEmpty(ICONS.empty, this._t("emptyTitle"), this._emptyMessage())
               : arrivals.map((arrival) => this._renderRow(arrival))}
         </div>
         ${this._renderDialogs(stop)}
       </ha-card>
     `;
+  }
+
+  /** Rows of the shape that is coming, while it comes. */
+  _renderSkeleton() {
+    const count = Math.min(this._config.max_arrivals ?? 3, 3);
+    return html`<div role="progressbar" aria-label=${this._t("loading")}>
+      ${Array.from(
+        { length: count },
+        () => html`<div class="skeleton" aria-hidden="true">
+          <span class="bone pill"></span><span class="bone text"></span
+          ><span class="bone eta"></span>
+        </div>`,
+      )}
+    </div>`;
+  }
+
+  _renderEmpty(path, title, text) {
+    return html`<div class="empty">
+      ${icon(path, { size: 40 })}
+      <p class="empty-title">${title}</p>
+      ${text ? html`<p class="empty-text">${text}</p>` : nothing}
+    </div>`;
   }
 
   /**
@@ -313,21 +363,27 @@ export class IsraelTransitCard extends LitElement {
       <button
         class="header"
         part="header"
-        @click=${() => (this._stopDialog = true)}
-        aria-label=${this._t("stopDetails")}
+        @click=${(ev) => this._open("_stopDialog", true, ev)}
+        aria-label=${`${title}. ${this._t("stopDetails")}`}
       >
         <div class="titles">
           <div class="stop-name">${title}</div>
           ${city || code
             ? html`<div class="stop-meta">
                 ${city ? html`<span>${stop.city}</span>` : nothing}
-                ${code ? html`<span class="code">${stop.code}</span>` : nothing}
+                ${code ? html`<span class="code ltr">${stop.code}</span>` : nothing}
               </div>`
             : nothing}
         </div>
-        <ha-icon class="muted" icon="mdi:information-outline"></ha-icon>
+        ${icon(ICONS.info, { size: 24, cls: "icon info" })}
       </button>
     `;
+  }
+
+  /** Open a dialog, remembering what to give focus back to when it closes. */
+  _open(which, value, ev) {
+    this._opener = ev?.currentTarget ?? null;
+    this[which] = value;
   }
 
   _renderRow(arrival) {
@@ -336,14 +392,26 @@ export class IsraelTransitCard extends LitElement {
     // Past an hour a countdown stops meaning anything; show the clock instead.
     const asClock = minutes === null || minutes > 59;
     const clock = formatClock(arrival.eta, this.hass);
+    const destination = arrival.destination || arrival.line_name;
+    const when = asClock
+      ? clock
+      : minutes === 0
+        ? this._t("now")
+        : `${minutes} ${this._t("minutesLong")}`;
 
     return html`
-      <button class="row" @click=${() => (this._routeDialog = arrival)}>
+      <button
+        class="row"
+        @click=${(ev) => this._open("_routeDialog", arrival, ev)}
+        aria-label=${[
+          `${modeLabel(this.hass, arrival.route_type) || this._t("lineDetails")} ${arrival.line_name}`,
+          destination,
+          when,
+          arrival.is_realtime ? this._t("live") : this._t("scheduled"),
+        ].join(", ")}
+      >
         ${config.show_mode_icon
-          ? html`<ha-icon
-              class="mode"
-              .icon=${modeIcon(arrival.route_type)}
-            ></ha-icon>`
+          ? icon(modePath(arrival.route_type), { cls: "icon mode" })
           : nothing}
         <div
           class="badge"
@@ -353,28 +421,37 @@ export class IsraelTransitCard extends LitElement {
         </div>
         <div class="row-body">
           ${config.show_destination !== false
-            ? html`<div class="destination">
-                ${arrival.destination || arrival.line_name}
-              </div>`
+            ? html`<div class="destination">${destination}</div>`
             : nothing}
           ${this._renderSub(arrival)}
         </div>
-        <div class="eta ${minutes === 0 ? "eta-now" : ""}">
-          ${asClock
-            ? html`<span class="eta-value eta-clock">${clock}</span>`
-            : minutes === 0
-              ? html`<span class="eta-value">${this._t("now")}</span>`
-              : html`<span class="eta-value">${minutes}</span>
-                  <span class="eta-unit">${this._t("minutes")}</span>`}
-          ${config.show_clock && !asClock
-            ? html`<span class="at-clock">${clock}</span>`
-            : nothing}
-          ${config.show_delay !== false && arrival.delay_minutes
-            ? html`<span class="delay">+${arrival.delay_minutes}</span>`
-            : nothing}
+        <div class="eta ${minutes === 0 ? "eta-now" : ""}" aria-hidden="true">
+          <div class="eta-main">
+            ${asClock
+              ? html`<span class="eta-value eta-clock ltr">${clock}</span>`
+              : minutes === 0
+                ? html`<span class="eta-value">${this._t("now")}</span>`
+                : html`<span class="eta-value">${minutes}</span>
+                    <span class="eta-unit">${this._t("minutes")}</span>`}
+          </div>
+          ${this._renderEtaExtra(arrival, asClock, clock)}
         </div>
+        ${icon(ICONS.chevron, { size: 20, cls: "icon chevron flip" })}
       </button>
     `;
+  }
+
+  /** Under the minutes: live or not, the clock, the delay. */
+  _renderEtaExtra(arrival, asClock, clock) {
+    const config = this._config;
+    const parts = [
+      arrival.is_realtime ? icon(ICONS.live, { size: 12, cls: "icon live" }) : nothing,
+      config.show_clock && !asClock ? html`<span class="ltr">${clock}</span>` : nothing,
+      config.show_delay !== false && arrival.delay_minutes
+        ? html`<span class="delay ltr">+${arrival.delay_minutes}</span>`
+        : nothing,
+    ].filter((part) => part !== nothing);
+    return parts.length ? html`<div class="eta-extra">${parts}</div>` : nothing;
   }
 
   /** The second line of a row: operator, timetable tag, platform. */
@@ -389,11 +466,7 @@ export class IsraelTransitCard extends LitElement {
       // the operator and the platform.
       config.show_realtime_tag !== false && !arrival.is_realtime
         ? html`<span class="tag timetable"
-            ><ha-icon
-              icon="mdi:calendar-clock"
-              style="--mdc-icon-size:13px"
-            ></ha-icon
-            >${this._t("scheduled")}</span
+            >${icon(ICONS.timetable, { size: 14 })}${this._t("scheduled")}</span
           >`
         : nothing,
       config.show_platform !== false && arrival.platform
@@ -406,7 +479,7 @@ export class IsraelTransitCard extends LitElement {
     // left a stray dot on every row whose later parts were switched off.
     return html`<div class="sub">
       ${parts.map((part, index) =>
-        index ? html`<span class="sep">·</span>${part}` : part,
+        index ? html`<span class="sep" aria-hidden="true">·</span>${part}` : part,
       )}
     </div>`;
   }
@@ -417,6 +490,7 @@ export class IsraelTransitCard extends LitElement {
         ? html`<israel-transit-stop-dialog
             .hass=${this.hass}
             .stop=${stop}
+            .opener=${this._opener}
             .open=${true}
             @israel-transit-dialog-closed=${() => (this._stopDialog = false)}
           ></israel-transit-stop-dialog>`
@@ -427,6 +501,8 @@ export class IsraelTransitCard extends LitElement {
             .arrival=${this._routeDialog}
             .stopCode=${stop?.code ?? this._config.stop_code}
             .showMap=${this._config.show_map !== false}
+            .clockOffset=${this._clockOffset ?? 0}
+            .opener=${this._opener}
             .open=${true}
             @israel-transit-dialog-closed=${() => (this._routeDialog = null)}
           ></israel-transit-route-dialog>`

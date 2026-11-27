@@ -28,18 +28,23 @@ from .api import ISRAEL_TZ, Arrival, RouteInfo, RouteStop, Stop
 from .const import DOMAIN, GTFS_DB_FILENAME, ISSUE_INDEX_FAILED
 from .gtfs import (
     MEMBERS,
+    OPTIONAL_MEMBERS,
+    SCHEMA_VERSION,
     FeedVersion,
     GtfsDownloader,
     GtfsError,
     activate_index,
     connect,
     get_stop,
+    route_shape,
     route_stops,
     routes_at_stop,
     scheduled_arrivals,
-    schema_is_current,
+    schema_is_readable,
     search_stops,
     stage_index,
+    stored_built,
+    stored_schema,
     stored_stop_codes,
     stored_version,
 )
@@ -68,6 +73,9 @@ class GtfsIndex:
         self._task: asyncio.Task[bool] | None = None
         # נקרא פעם אחת בפתיחה, כדי שבדיקה אם תחנה כבר באינדקס לא תיגע ב-SQLite.
         self._indexed_stops: frozenset[int] = frozenset()
+        # אינדקס מסכמה ישנה אך קריאה נשאר פתוח, ורק מסומן לבנייה מחדש.
+        self._schema_current = False
+        self._built: str | None = None
         self.last_build: dict[str, int] | None = None
         self.last_error: str | None = None
 
@@ -79,6 +87,11 @@ class GtfsIndex:
     def indexed_stops(self) -> frozenset[int]:
         """התחנות שלאינדקס הפתוח יש עבורן לוח זמנים של אוטובוסים."""
         return self._indexed_stops
+
+    @property
+    def built(self) -> str | None:
+        """מתי נבנה האינדקס הפתוח, כפי שנרשם ב-meta."""
+        return self._built
 
     @property
     def building(self) -> bool:
@@ -103,8 +116,8 @@ class GtfsIndex:
             if connection is None:
                 return False
             self._connection = connection
-            current = await self._hass.async_add_executor_job(
-                self._locked, schema_is_current, self._connection
+            schema = await self._hass.async_add_executor_job(
+                self._locked, stored_schema, self._connection
             )
         except sqlite3.Error as err:
             _LOGGER.warning("Existing GTFS index is unusable (%s); rebuilding", err)
@@ -112,19 +125,29 @@ class GtfsIndex:
             # ולא רק נזנח.
             await self.async_close()
             return False
-        if not current:
-            # An upgrade changed the tables. Querying it would mean crashing on
-            # a missing column, and rebuilding costs a few seconds.
-            _LOGGER.info("GTFS index predates this version; rebuilding")
+        if not schema_is_readable(schema):
+            # Querying it would mean crashing on a missing column.
+            _LOGGER.info("GTFS index schema %s is unreadable; rebuilding", schema)
             await self.async_close()
             return False
-        self._indexed_stops = await self._hass.async_add_executor_job(
-            self._locked, stored_stop_codes, self._connection
+        self._schema_current = schema == SCHEMA_VERSION
+        if not self._schema_current:
+            # Still answers every query; the next refresh replaces it.
+            _LOGGER.info("GTFS index predates this version; rebuilding")
+        self._indexed_stops, self._built = await self._hass.async_add_executor_job(
+            self._locked, self._loaded_state, self._connection
         )
         return True
 
+    @staticmethod
+    def _loaded_state(
+        connection: sqlite3.Connection,
+    ) -> tuple[frozenset[int], str | None]:
+        return stored_stop_codes(connection), stored_built(connection)
+
     async def async_close(self) -> None:
         self._indexed_stops = frozenset()
+        self._built = None
         if self._connection is not None:
             connection, self._connection = self._connection, None
             await self._hass.async_add_executor_job(self._locked, connection.close)
@@ -170,7 +193,7 @@ class GtfsIndex:
 
         ``stop_codes`` מתקבל גם כפונקציה, ואז הוא נקרא רק כשתורו של הרענון מגיע:
         שלוש תחנות שנוספו בזו אחר זו נכנסות לבנייה אחת במקום לשלוש, וכל בנייה
-        עולה הורדה של 115MB וסריקה של 21 מיליון שורות.
+        עולה הורדה של כ-150MB וסריקה של 21 מיליון שורות.
         """
         async with self._lock:
             wanted = stop_codes() if callable(stop_codes) else stop_codes
@@ -185,7 +208,7 @@ class GtfsIndex:
                     self._locked, self._stored_state
                 )
                 missing = stop_codes - indexed
-                if current == version.token and not missing:
+                if current == version.token and not missing and self._schema_current:
                     _LOGGER.debug("GTFS feed unchanged (%s)", version.token)
                     return False
                 if missing:
@@ -236,6 +259,7 @@ class GtfsIndex:
         missing = [name for name in MEMBERS if name not in members]
         if missing:
             raise GtfsError(f"GTFS feed is missing {', '.join(missing)}")
+        wanted = [*MEMBERS, *(name for name in OPTIONAL_MEMBERS if name in members)]
 
         workdir = Path(
             await self._hass.async_add_executor_job(
@@ -245,7 +269,7 @@ class GtfsIndex:
         try:
             files: dict[str, Path] = {}
             downloaded = 0
-            for name in MEMBERS:
+            for name in wanted:
                 target = workdir / f"{name}.deflate"
                 downloaded += await self._downloader.async_fetch_member(
                     members[name], target
@@ -266,11 +290,12 @@ class GtfsIndex:
             self.last_build = stats
             _LOGGER.info(
                 "Built GTFS index: %s stops, %s routes, %s pattern rows, "
-                "%s timetabled departures from %s scanned rows (%.1f MB)",
+                "%s timetabled departures, %s shapes from %s scanned rows (%.1f MB)",
                 f"{stats['stops']:,}",
                 f"{stats['routes']:,}",
                 f"{stats['patterns']:,}",
                 f"{stats['departures']:,}",
+                f"{stats['shapes']:,}",
                 f"{stats['stop_times_scanned']:,}",
                 stats["db_bytes"] / 1048576,
             )
@@ -308,6 +333,9 @@ class GtfsIndex:
 
     async def async_route_stops(self, route_id: int) -> list[RouteStop]:
         return await self._query(route_stops, int(route_id))
+
+    async def async_route_shape(self, route_id: int) -> list[list[float]] | None:
+        return await self._query(route_shape, int(route_id))
 
     async def async_departures(
         self, code: int, now: datetime | None = None, hours: int = 3

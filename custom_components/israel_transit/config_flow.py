@@ -2,7 +2,7 @@
 
 The integration itself takes no configuration: adding it is one click, and
 that is deliberate. The stop table lives in a local index built from the
-Ministry feed, which is a 90 MB download the first time, so a setup that
+Ministry feed, which is a 150 MB download the first time, so a setup that
 demanded a stop up front could only fail on a fresh install -- there was
 nothing to search yet.
 
@@ -84,7 +84,7 @@ class IsraelTransitConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Confirm, and nothing more: the integration has no settings.
 
-        The one thing worth saying first is that accepting starts a 90 MB
+        The one thing worth saying first is that accepting starts a 150 MB
         download, so this is a confirmation rather than a silent create.
         """
         await self.async_set_unique_id(DOMAIN)
@@ -133,7 +133,7 @@ class StopSubentryFlowHandler(ConfigSubentryFlow):
         """Hold the flow while the index is built, or None to carry on.
 
         The stop table lives in that index, so until a build finishes there is
-        nothing to search. It downloads about 90 MB, which is a progress step
+        nothing to search. It downloads about 150 MB, which is a progress step
         rather than an error.
 
         A flow showing progress may only move to progress or progress-done, so

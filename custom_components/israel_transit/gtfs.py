@@ -4,14 +4,16 @@ The published feed is a 154 MB ZIP that expands to about 1 GB, which is far more
 than is worth keeping. Three things make it cheap:
 
 * The server honours HTTP range requests, so the ZIP central directory is read
-  with three short reads and only the members we need are fetched. ``shapes.txt``
-  alone is 57 MB of compressed data we never touch.
+  with three short reads and only the members we need are fetched; the fare
+  tables are never touched.
 * ``stop_times.txt`` -- 86 MB compressed, 737 MB of CSV, 14.5 million rows -- is
   streamed and filtered as it arrives, never materialised.
 * Only what real-time data cannot answer is stored: one representative stop
   pattern per route, and full timetables for the modes that publish nothing to
   SIRI (light rail, rail, the cable lines) plus the stops the user configured.
-  That is a few hundred thousand rows rather than 14.5 million.
+  That is a few hundred thousand rows rather than 14.5 million. ``shapes.txt``
+  is read the same way, keeping only the routes through those stops,
+  simplified to a few metres.
 
 The result is a SQLite file of a few tens of MB that answers every query the card
 makes in well under a millisecond, works offline, and needs rebuilding only when
@@ -27,10 +29,14 @@ from __future__ import annotations
 import asyncio
 import csv
 import logging
+import math
 import re
 import sqlite3
 import struct
+import sys
 import zlib
+from array import array
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -51,7 +57,7 @@ from .const import GTFS_URL, NON_REALTIME_ROUTE_TYPES, USER_AGENT
 
 _LOGGER = logging.getLogger(__name__)
 
-# Members we read. shapes.txt (57 MB) and the fare tables are never fetched.
+# Members we read. The fare tables are never fetched.
 MEMBERS: Final = (
     "agency.txt",
     "routes.txt",
@@ -60,6 +66,14 @@ MEMBERS: Final = (
     "calendar.txt",
     "stop_times.txt",
 )
+
+# Read when the feed has them; a feed without them still builds.
+OPTIONAL_MEMBERS: Final = ("shapes.txt",)
+
+# Douglas-Peucker tolerance, in metres. Below what a card map can show.
+_SHAPE_TOLERANCE_M: Final = 3.0
+# Metres per microdegree of latitude.
+_M_PER_MICRODEG: Final = 0.111_32
 
 # stop_desc looks like "רחוב: בן יהודה 74 עיר: כפר סבא רציף:  קומה: "
 _CITY_RE: Final = re.compile(r"עיר:\s*(.*?)\s*(?:רציף:|קומה:|$)")
@@ -71,9 +85,12 @@ _ZIP64_MARK: Final = 0xFFFFFFFF
 _MAX_SEARCH_WORDS: Final = 4
 
 # Bumped whenever the tables below change shape. An index built by an older
-# version is discarded rather than queried, since a missing column is a crash
-# and a rebuild is only a few seconds.
-SCHEMA_VERSION: Final = 2
+# version stays in use while its replacement is built, as long as it has every
+# column the queries read; one older than that is discarded.
+SCHEMA_VERSION: Final = 3
+# The oldest schema the current queries can still read: one that has every
+# column they select. route_shape copes with the missing shapes table itself.
+MIN_READABLE_SCHEMA: Final = 2
 
 _SCHEMA: Final = """
 CREATE TABLE stops (
@@ -82,7 +99,7 @@ CREATE TABLE stops (
 );
 CREATE TABLE routes (
     route_id INTEGER PRIMARY KEY, short_name TEXT, long_name TEXT,
-    agency TEXT, route_type TEXT, headsign TEXT
+    agency TEXT, route_type TEXT, headsign TEXT, shape_id TEXT
 );
 CREATE TABLE patterns (
     route_id INTEGER NOT NULL, seq INTEGER NOT NULL,
@@ -96,6 +113,7 @@ CREATE TABLE calendar (
     service_id INTEGER PRIMARY KEY, days INTEGER NOT NULL,
     start_date INTEGER NOT NULL, end_date INTEGER NOT NULL
 );
+CREATE TABLE shapes (shape_id TEXT PRIMARY KEY, points BLOB);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -298,9 +316,9 @@ class GtfsDownloader:
             "Range": f"bytes={start}-{start + member.compress_size - 1}",
             "User-Agent": USER_AGENT,
         }
-        # Opening and writing are blocking calls, and this streams ~90 MB, so
+        # Opening and writing are blocking calls, and this streams ~150 MB, so
         # every one of them is handed to a worker thread. The chunk is a whole
-        # megabyte, which keeps the number of hops to about ninety.
+        # megabyte, which keeps the number of hops to about a hundred and fifty.
         loop = asyncio.get_running_loop()
         written = 0
         try:
@@ -380,6 +398,129 @@ def _int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _in_israel(lat: int, lon: int) -> bool:
+    """Microdegrees inside a box around Israel; (0, 0) and stray points fall out."""
+    return 29_000_000 <= lat <= 34_000_000 and 34_000_000 <= lon <= 36_000_000
+
+
+def read_shapes(
+    lines: Iterator[str], wanted: set[str]
+) -> dict[str, tuple[array[int], array[int], array[int]]]:
+    """The points of the wanted shapes: (seq, lat, lon) arrays, in file order.
+
+    shapes.txt is the largest member after stop_times, so a row is tested by
+    its shape_id before paying for any number conversion.
+    """
+    rows = csv.reader(lines)
+    header = next(rows, None)
+    if header is None:
+        return {}
+    try:
+        i_id, i_lat, i_lon, i_seq = (
+            header.index(name)
+            for name in (
+                "shape_id",
+                "shape_pt_lat",
+                "shape_pt_lon",
+                "shape_pt_sequence",
+            )
+        )
+    except ValueError as err:
+        raise GtfsError(f"shapes.txt lacks a column: {err}") from err
+    width = max(i_id, i_lat, i_lon, i_seq)
+    shapes: dict[str, tuple[array[int], array[int], array[int]]] = {}
+    for row in rows:
+        if len(row) <= width or (shape_id := row[i_id]) not in wanted:
+            continue
+        try:
+            seq = int(row[i_seq])
+            lat = round(float(row[i_lat]) * 1e6)
+            lon = round(float(row[i_lon]) * 1e6)
+        except ValueError:
+            continue
+        if shape_id not in shapes:
+            shapes[shape_id] = (array("i"), array("i"), array("i"))
+        seqs, lats, lons = shapes[shape_id]
+        seqs.append(seq)
+        lats.append(lat)
+        lons.append(lon)
+    return shapes
+
+
+def simplify(lats: list[int], lons: list[int], tolerance: float) -> list[int]:
+    """Douglas-Peucker over microdegrees; returns the indexes of the kept points.
+
+    Iterative, with an explicit stack: a shape runs to thousands of points and
+    recursion would hit Python's limit. Distances are squared, in metres, on a
+    local flat projection, which is plenty at the scale of a bus route.
+    """
+    count = len(lats)
+    if count < 3:
+        return list(range(count))
+    scale_x = _M_PER_MICRODEG * math.cos(math.radians(lats[0] / 1e6))
+    xs = [lon * scale_x for lon in lons]
+    ys = [lat * _M_PER_MICRODEG for lat in lats]
+    limit = tolerance * tolerance
+    keep = bytearray(count)
+    keep[0] = keep[-1] = 1
+    stack = [(0, count - 1)]
+    while stack:
+        start, end = stack.pop()
+        if end - start < 2:
+            continue
+        ax, ay = xs[start], ys[start]
+        dx, dy = xs[end] - ax, ys[end] - ay
+        length = dx * dx + dy * dy
+        worst, worst_at = -1.0, start
+        for i in range(start + 1, end):
+            px, py = xs[i] - ax, ys[i] - ay
+            if length:
+                # Distance to the segment, not to the infinite line.
+                t = max(0.0, min(1.0, (px * dx + py * dy) / length))
+                px, py = px - t * dx, py - t * dy
+            # A closed loop has a zero-length chord; measure from its start.
+            distance = px * px + py * py
+            if distance > worst:
+                worst, worst_at = distance, i
+        if worst > limit:
+            keep[worst_at] = 1
+            stack.append((start, worst_at))
+            stack.append((worst_at, end))
+    return [i for i in range(count) if keep[i]]
+
+
+def encode_shape(seqs: array[int], lats: array[int], lons: array[int]) -> bytes | None:
+    """Sort, clean and simplify one shape into interleaved little-endian int32.
+
+    The file order of shapes.txt is not guaranteed, so the points are put in
+    sequence order first. None when fewer than two points survive.
+    """
+    order = sorted(range(len(seqs)), key=seqs.__getitem__)
+    points = [(lats[i], lons[i]) for i in order if _in_israel(lats[i], lons[i])]
+    if len(points) < 2:
+        return None
+    kept_lats = [lat for lat, _ in points]
+    kept_lons = [lon for _, lon in points]
+    out = array("i")
+    for i in simplify(kept_lats, kept_lons, _SHAPE_TOLERANCE_M):
+        out.append(kept_lats[i])
+        out.append(kept_lons[i])
+    if sys.byteorder == "big":
+        out.byteswap()
+    return out.tobytes()
+
+
+def decode_shape(blob: bytes) -> list[list[float]]:
+    """Interleaved little-endian microdegrees back into [[lat, lon], ...]."""
+    values = array("i")
+    values.frombytes(blob)
+    if sys.byteorder == "big":
+        values.byteswap()
+    return [
+        [values[i] / 1e6, values[i + 1] / 1e6] for i in range(0, len(values) - 1, 2)
+    ]
+
+
 def staged_path(db_path: Path) -> Path:
     """Where an index is written before it takes the place of the live one."""
     return db_path.with_suffix(".building")
@@ -450,6 +591,9 @@ def stage_index(
     pattern_trips: dict[str, str] = {}  # trip_id -> route key
     timetable_trips: dict[str, tuple[str, int]] = {}  # trip_id -> (route key, service)
     headsigns: dict[str, str] = {}
+    route_shapes: dict[str, str] = {}  # route key -> shape_id
+    # Routes whose pattern trip has no shape_id fall back to their most common.
+    shape_votes: dict[str, Counter[str]] = {}
     seen_routes: set[str] = set()
     for row in _member_rows(files["trips.txt"]):
         route_key = row.get("route_id", "")
@@ -457,12 +601,22 @@ def stage_index(
         if route is None:
             continue
         trip_id = row["trip_id"]
+        shape_id = row.get("shape_id") or ""
         if route_key not in seen_routes:
             seen_routes.add(route_key)
             pattern_trips[trip_id] = route_key
             headsigns[route_key] = row.get("trip_headsign", "")
+            if shape_id:
+                route_shapes[route_key] = shape_id
+            else:
+                shape_votes[route_key] = Counter()
+        elif shape_id and route_key in shape_votes:
+            shape_votes[route_key][shape_id] += 1
         if route[4] in NON_REALTIME_ROUTE_TYPES:
             timetable_trips[trip_id] = (route_key, _int(row.get("service_id")))
+    for route_key, votes in shape_votes.items():
+        if votes:
+            route_shapes[route_key] = votes.most_common(1)[0][0]
     stats["pattern_trips"] = len(pattern_trips)
     stats["timetable_trips"] = len(timetable_trips)
 
@@ -552,6 +706,24 @@ def stage_index(
     stats["patterns"] = len(patterns)
     stats["departures"] = len(departures)
 
+    # Shapes only for the routes through the indexed stops: the card draws a
+    # route from a stop's board, and every route would cost tens of MB.
+    serving = {
+        route_id for route_id, _, code, _ in patterns if code in extra_stop_codes
+    } | {route_id for code, route_id, _, _ in departures if code in extra_stop_codes}
+    wanted_shapes = {
+        shape_id for key, shape_id in route_shapes.items() if routes[key][0] in serving
+    }
+    shape_rows: list[tuple[str, bytes]] = []
+    if wanted_shapes and "shapes.txt" in files:
+        # Each shape_id once, however many routes share it.
+        for shape_id, (seqs, lats, lons) in read_shapes(
+            _member_lines(files["shapes.txt"]), wanted_shapes
+        ).items():
+            if (blob := encode_shape(seqs, lats, lons)) is not None:
+                shape_rows.append((shape_id, blob))
+    stats["shapes"] = len(shape_rows)
+
     calendar_rows = [
         (
             _int(row["service_id"]),
@@ -575,12 +747,21 @@ def stage_index(
             "INSERT OR REPLACE INTO stops VALUES (?,?,?,?,?,?)", list(stops.values())
         )
         connection.executemany(
-            "INSERT OR REPLACE INTO routes VALUES (?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO routes VALUES (?,?,?,?,?,?,?)",
             [
-                (rid, short, long_name, agency, rtype, headsigns.get(key, ""))
+                (
+                    rid,
+                    short,
+                    long_name,
+                    agency,
+                    rtype,
+                    headsigns.get(key, ""),
+                    route_shapes.get(key),
+                )
                 for key, (rid, short, long_name, agency, rtype) in routes.items()
             ],
         )
+        connection.executemany("INSERT INTO shapes VALUES (?,?)", shape_rows)
         connection.executemany("INSERT INTO patterns VALUES (?,?,?,?)", patterns)
         connection.executemany("INSERT INTO departures VALUES (?,?,?,?)", departures)
         connection.executemany(
@@ -644,10 +825,21 @@ def stored_stop_codes(connection: sqlite3.Connection) -> frozenset[int]:
     )
 
 
-def schema_is_current(connection: sqlite3.Connection) -> bool:
-    """Whether this index was built by the current schema."""
+def stored_schema(connection: sqlite3.Connection) -> int | None:
+    """The schema this index was built by, or None when it does not say."""
     row = connection.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
-    return bool(row) and row["value"] == str(SCHEMA_VERSION)
+    return _int(row["value"], -1) if row else None
+
+
+def schema_is_readable(schema: int | None) -> bool:
+    """Whether the current queries can run on an index of this schema."""
+    return schema is not None and MIN_READABLE_SCHEMA <= schema <= SCHEMA_VERSION
+
+
+def stored_built(connection: sqlite3.Connection) -> str | None:
+    """When this index was built, as written to meta."""
+    row = connection.execute("SELECT value FROM meta WHERE key='built'").fetchone()
+    return row["value"] if row else None
 
 
 def service_day_bit(day: date) -> int:
@@ -825,6 +1017,26 @@ def route_stops(connection: sqlite3.Connection, route_id: int) -> list[RouteStop
         )
         for row in rows
     ]
+
+
+def route_shape(
+    connection: sqlite3.Connection, route_id: int
+) -> list[list[float]] | None:
+    """The street path of a route as [[lat, lon], ...], or None without one.
+
+    An index from schema 2 has no shapes table, and keeps answering until the
+    rebuild replaces it.
+    """
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='shapes'"
+    ).fetchone():
+        return None
+    row = connection.execute(
+        "SELECT s.points FROM routes r JOIN shapes s ON s.shape_id = r.shape_id "
+        "WHERE r.route_id = ?",
+        (route_id,),
+    ).fetchone()
+    return decode_shape(row["points"]) if row else None
 
 
 def scheduled_arrivals(

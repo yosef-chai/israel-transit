@@ -76,7 +76,12 @@ async def test_the_stop_board_is_served_from_the_coordinator(
     assert result["success"]
     assert result["result"]["stop"]["code"] == 21023
     assert result["result"]["arrivals"][0]["line_name"] == "36"
+    assert "vehicle_seen" in result["result"]["arrivals"][0]
     assert mock_curlbus.arrivals.call_count == calls_before
+    # The card ages vehicle positions against this, not the browser clock.
+    server_time = dt_util.parse_datetime(result["result"]["server_time"])
+    assert server_time is not None
+    assert abs(server_time - dt_util.utcnow()) < timedelta(minutes=1)
 
 
 async def test_an_unknown_stop_is_an_error_not_an_empty_board(
@@ -141,7 +146,7 @@ async def test_route_stops_uses_the_vehicle_departure_for_absolute_times(
     result = await client.receive_json()
 
     assert result["success"]
-    first, second = result["result"]
+    first, second = result["result"]["stops"]
     assert first["arrival_time"].startswith("2026-08-30T22:00:00")
     assert second["arrival_time"].startswith("2026-08-30T22:10:00")
     assert second["offset_seconds"] == 600
@@ -162,8 +167,47 @@ async def test_route_stops_without_a_departure_returns_offsets_only(
     result = await client.receive_json()
 
     assert result["success"]
-    assert result["result"][0]["arrival_time"] is None
-    assert result["result"][0]["offset_seconds"] == 420
+    assert result["result"]["stops"][0]["arrival_time"] is None
+    assert result["result"]["stops"][0]["offset_seconds"] == 420
+    assert result["result"]["shape"] is None
+
+
+async def test_route_stops_carries_the_street_path_and_the_index_build(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    loaded_entry: MockConfigEntry,
+    mock_index: AsyncMock,
+) -> None:
+    """The card caches the path per index build, so both come together."""
+    mock_index.async_route_shape.return_value = [
+        [32.0726664, 34.7933899],
+        [32.01, 34.75],
+    ]
+    client = await hass_ws_client(hass)
+
+    await client.send_json_auto_id({"type": f"{DOMAIN}/route_stops", "line_ref": 960})
+    result = await client.receive_json()
+
+    assert result["success"]
+    assert result["result"]["shape"] == [[32.07267, 34.79339], [32.01, 34.75]]
+    assert result["result"]["index"] == "2026-08-30T04:00:00"
+    mock_index.async_route_shape.assert_awaited_once_with(960)
+
+
+async def test_route_stops_reports_a_broken_index(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    loaded_entry: MockConfigEntry,
+    mock_index: AsyncMock,
+) -> None:
+    mock_index.async_route_shape.side_effect = IsraelTransitError("replaced")
+    client = await hass_ws_client(hass)
+
+    await client.send_json_auto_id({"type": f"{DOMAIN}/route_stops", "line_ref": 960})
+    result = await client.receive_json()
+
+    assert not result["success"]
+    assert result["error"]["code"] == "lookup_failed"
 
 
 async def test_a_stop_whose_first_read_failed_is_fetched_rather_than_crashed_on(

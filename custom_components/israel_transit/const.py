@@ -74,7 +74,7 @@ RAIL_MATCH_WINDOW: Final = timedelta(minutes=1)
 MAX_REMEMBERED_STOPS: Final = 40
 REMEMBERED_STOP_MAX_AGE: Final = 30 * 24 * 3600.0
 STOP_REGISTRY_SAVE_DELAY: Final = 30
-# בנייה מחדש עולה הורדה של כ-90MB, ולוח מחוונים נטען עם כל הכרטיסים יחד --
+# בנייה מחדש עולה הורדה של כ-150MB, ולוח מחוונים נטען עם כל הכרטיסים יחד --
 # ההמתנה הקצרה אוספת את כולם לבנייה אחת.
 NEW_STOP_INDEX_DELAY: Final = 20
 # גג לניסיונות חוזרים כשהבנייה נכשלת: אחרת כל רענון של כרטיס היה מזמין עוד אחת.

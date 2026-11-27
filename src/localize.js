@@ -36,10 +36,36 @@ const STRINGS = {
     noLines: "לא נמצאו קווים בתחנה הזו",
     noRouteStops: "לא נמצא מסלול לקו הזה",
     close: "סגירה",
+    live: "בזמן אמת",
+    emptyTitle: "אין מה להציג כרגע",
+    errorTitle: "לא ניתן לטעון",
     // the map
     vehicleMap: "מיקום הרכב",
     routeLine: "מסלול הקו",
     noVehicleLocation: "המפעיל אינו משדר את מיקום הרכב",
+    vehicleOf: "קו {line}, מיקום הרכב",
+    vehicleStale: "קו {line}, מיקום אחרון ידוע",
+    nearStop: "ליד {stop}",
+    awayFromRoute: "הרכב לא נמצא על המסלול",
+    stopsToGo: "עוד {n} תחנות עד התחנה שלך",
+    stopsToGoOne: "התחנה הבאה היא התחנה שלך",
+    atYourStop: "הרכב בתחנה שלך",
+    positionAge: "מיקום מלפני {n} דק׳",
+    positionAgeSeconds: "מיקום מלפני פחות מדקה",
+    approximateRoute: "המסלול משוער: קווים ישרים בין התחנות",
+    arrivesAt: "מגיע אליך ב־{time}",
+    mapUnavailable: "המפה לא זמינה כרגע. רשימת התחנות למטה עדיין עדכנית.",
+    mapUnsupported: "הדפדפן הזה לא יכול להציג את המפה. רשימת התחנות למטה מציגה את אותו מידע.",
+    mapFailed: "המפה הפסיקה לעבוד.",
+    mapVendor: "המפה לא נטענה, כנראה כי הכרטיס התעדכן. צריך לרענן את הדף.",
+    retry: "ניסיון חוזר",
+    reload: "רענון הדף",
+    recenter: "חזרה לרכב",
+    zoomIn: "התקרבות",
+    zoomOut: "התרחקות",
+    attribution: "קרדיטים של המפה",
+    mapLabel: "מפת המסלול",
+    showOnMap: "הצגה במפה",
     // editor
     editorStop: "תחנה",
     editorSearch: "חיפוש תחנה לפי שם, עיר, רחוב או קוד",
@@ -119,9 +145,35 @@ const STRINGS = {
     noLines: "No lines found at this stop",
     noRouteStops: "No route found for this line",
     close: "Close",
+    live: "Real time",
+    emptyTitle: "Nothing to show right now",
+    errorTitle: "Could not load",
     vehicleMap: "Vehicle position",
     routeLine: "Route",
     noVehicleLocation: "The operator is not broadcasting this vehicle's position",
+    vehicleOf: "Line {line}, vehicle position",
+    vehicleStale: "Line {line}, last known position",
+    nearStop: "Near {stop}",
+    awayFromRoute: "The vehicle is not on the route",
+    stopsToGo: "{n} stops to your stop",
+    stopsToGoOne: "Your stop is next",
+    atYourStop: "The vehicle is at your stop",
+    positionAge: "Position from {n} min ago",
+    positionAgeSeconds: "Position from less than a minute ago",
+    approximateRoute: "Approximate route: straight lines between stops",
+    arrivesAt: "Reaches you at {time}",
+    mapUnavailable: "The map is not available right now. The stop list below is still current.",
+    mapUnsupported: "This browser cannot show the map. The stop list below shows the same information.",
+    mapFailed: "The map stopped working.",
+    mapVendor: "The map did not load, probably because the card was updated. Reload the page.",
+    retry: "Try again",
+    reload: "Reload page",
+    recenter: "Back to vehicle",
+    zoomIn: "Zoom in",
+    zoomOut: "Zoom out",
+    attribution: "Map credits",
+    mapLabel: "Route map",
+    showOnMap: "Show on map",
     editorStop: "Stop",
     editorSearch: "Search by stop name, city, street or code",
     editorSearchHelp: 'Words combine, for example "Kfar Saba Weizmann"',
@@ -172,9 +224,13 @@ export const languageOf = (hass) =>
     ? "he"
     : "en";
 
-export const localize = (hass, key) => {
+/** A string in the user's language, with {name} placeholders filled in. */
+export const localize = (hass, key, values) => {
   const lang = languageOf(hass);
-  return STRINGS[lang][key] ?? STRINGS.en[key] ?? key;
+  const text = STRINGS[lang][key] ?? STRINGS.en[key] ?? key;
+  return values
+    ? text.replace(/\{(\w+)\}/g, (match, name) => (name in values ? String(values[name]) : match))
+    : text;
 };
 
 export const isRtl = (hass) => languageOf(hass) === "he";

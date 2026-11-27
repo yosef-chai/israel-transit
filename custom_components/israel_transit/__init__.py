@@ -220,7 +220,7 @@ async def _async_prepare_index(hass: HomeAssistant, clients: Clients) -> CALLBAC
     This belongs to the integration rather than to a stop, because the config
     flow searches the stop table: an index that only appeared once a stop
     existed would leave no way to add the first one. Building it downloads
-    about 90 MB, so it runs as a background task and the config flow waits on
+    about 150 MB, so it runs as a background task and the config flow waits on
     that task instead of failing.
     """
     if not await clients.index.async_load():
@@ -373,6 +373,11 @@ async def _async_register_card(hass: HomeAssistant) -> None:
             # The card reaches them here rather than through /api/brands, which
             # needs a rotating token the card would have to keep chasing.
             StaticPathConfig(BRAND_URL, str(here / "brand"), cache_headers=True),
+            # MapLibre, which the card imports beside itself the first time a
+            # map opens. Each version has its own folder, so caching is safe.
+            StaticPathConfig(
+                f"/{DOMAIN}/vendor", str(here / "www" / "vendor"), cache_headers=True
+            ),
         ]
     )
 

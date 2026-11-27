@@ -1,6 +1,6 @@
 """Fetching selected members out of the remote archive.
 
-The feed is 154 MB and only ~90 MB of it is wanted, so the downloader reads the
+The feed is 154 MB and about 150 MB of it is wanted, so the downloader reads the
 ZIP directory over byte ranges and then streams one member at a time. These
 tests serve a real ZIP out of memory through a fake session, so the range
 arithmetic and the local-header skip are exercised for real.

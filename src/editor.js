@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing } from "lit";
 
 import { DEFAULTS } from "./card.js";
+import { ICONS, icon } from "./icons.js";
 import { localize } from "./localize.js";
 import { sharedStyles } from "./styles.js";
 import { BRAND_ICON, DOMAIN, fireEvent, modeColor } from "./util.js";
@@ -10,8 +11,8 @@ const SEARCH_DEBOUNCE_MS = 300;
 /**
  * The config as the YAML should read: only what differs from the defaults.
  *
- * ha-form hands back every field it shows, defaults included, so without this
- * touching a single option wrote all fourteen of them into the dashboard.
+ * Every control holds a value, defaults included, so without this touching a
+ * single option would write all fourteen of them into the dashboard.
  */
 const compact = (config) =>
   Object.fromEntries(
@@ -46,22 +47,156 @@ export class IsraelTransitCardEditor extends LitElement {
     this._picking = false;
   }
 
-  // The search box is a plain <input>, not an <ha-textfield>.
-  //
-  // Home Assistant registers its form elements lazily, and a custom card has no
-  // supported way to force that -- the usual trick of building a built-in
-  // card's editor only works while that editor still imports them. When it does
-  // not, <ha-textfield> stays an unknown element: it renders as nothing at all,
-  // and the stop cannot be changed because there is no box to type into. A
-  // plain input cannot fail that way, and the theme tokens below give it the
-  // same look.
+  // Every control here is a native one: <input>, <select>, a checkbox with
+  // role="switch". Home Assistant's form elements (ha-form, ha-textfield) are
+  // not a promised API for custom cards and are registered lazily; when they
+  // had not been, they rendered as nothing and the stop could not be changed.
+  // A native control cannot fail that way, and the tokens below give it the
+  // look of the built-in editors.
   static styles = [
     sharedStyles,
     css`
       .box {
         display: flex;
         flex-direction: column;
-        gap: 16px;
+        gap: var(--ha-space-4, 16px);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: var(--ha-space-4, 16px);
+      }
+
+      .field select,
+      .field input[type="text"],
+      .field input[type="number"] {
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 48px;
+        padding: var(--ha-space-3, 12px) var(--ha-space-4, 16px);
+        border: var(--ha-border-width-sm, 1px) solid var(--ha-color-border-neutral-normal, rgba(127, 127, 127, 0.4));
+        border-radius: var(--ha-border-radius-md, 8px);
+        background: var(--ha-color-surface-default, var(--card-background-color));
+        color: var(--primary-text-color);
+        font: inherit;
+        font-size: var(--ha-font-size-l, 16px);
+      }
+
+      .field select:focus-visible,
+      .field input:focus-visible {
+        outline: 2px solid var(--ha-color-focus, var(--primary-color));
+        outline-offset: 2px;
+      }
+
+      .switch-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--ha-space-4, 16px);
+        min-height: 48px;
+        cursor: pointer;
+      }
+
+      .switch-text {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        font-size: var(--ha-font-size-m, 14px);
+        color: var(--primary-text-color);
+      }
+
+      /* A switch built on a checkbox, in Home Assistant's proportions. */
+      .switch {
+        appearance: none;
+        flex: 0 0 auto;
+        position: relative;
+        width: 36px;
+        height: 20px;
+        margin: 0;
+        border-radius: var(--ha-border-radius-pill, 9999px);
+        background: var(--ha-color-fill-neutral-loud-resting, rgba(127, 127, 127, 0.55));
+        cursor: pointer;
+        transition: background-color var(--ha-animation-duration-fast, 150ms);
+      }
+
+      .switch::after {
+        content: "";
+        position: absolute;
+        inset-block-start: 2px;
+        inset-inline-start: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: #fff;
+        transition: inset-inline-start var(--ha-animation-duration-fast, 150ms);
+      }
+
+      .switch:checked {
+        background: var(--primary-color);
+      }
+
+      .switch:checked::after {
+        inset-inline-start: 18px;
+      }
+
+      .switch:focus-visible {
+        outline: 2px solid var(--ha-color-focus, var(--primary-color));
+        outline-offset: 2px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .switch,
+        .switch::after {
+          transition: none;
+        }
+      }
+
+      .expandable {
+        border: var(--ha-border-width-sm, 1px) solid var(--divider-color, rgba(127, 127, 127, 0.3));
+        border-radius: var(--ha-border-radius-lg, 12px);
+      }
+
+      .expandable summary {
+        display: flex;
+        align-items: center;
+        gap: var(--ha-space-2, 8px);
+        min-height: 48px;
+        padding-inline: var(--ha-space-3, 12px);
+        list-style: none;
+        cursor: pointer;
+        font-size: var(--ha-font-size-m, 14px);
+        font-weight: var(--ha-font-weight-medium, 500);
+        color: var(--primary-text-color);
+      }
+
+      .expandable summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .expandable summary:focus-visible {
+        outline: 2px solid var(--ha-color-focus, var(--primary-color));
+        outline-offset: -2px;
+        border-radius: var(--ha-border-radius-lg, 12px);
+      }
+
+      .summary-chevron {
+        color: var(--secondary-text-color);
+        transition: transform var(--ha-animation-duration-fast, 150ms);
+      }
+
+      :host(:dir(rtl)) .summary-chevron {
+        transform: scaleX(-1);
+      }
+
+      .expandable[open] .summary-chevron {
+        transform: rotate(90deg);
+      }
+
+      .switches {
+        display: flex;
+        flex-direction: column;
+        padding: 0 var(--ha-space-4, 16px) var(--ha-space-2, 8px);
       }
 
       .brand {
@@ -239,8 +374,8 @@ export class IsraelTransitCardEditor extends LitElement {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 32px;
-        height: 32px;
+        width: 40px;
+        height: 40px;
         padding: 0;
         border: none;
         border-radius: 50%;
@@ -257,10 +392,6 @@ export class IsraelTransitCardEditor extends LitElement {
       .tool:disabled {
         opacity: 0.35;
         cursor: default;
-      }
-
-      .tool ha-icon {
-        --mdc-icon-size: 20px;
       }
 
       .chips {
@@ -459,111 +590,121 @@ export class IsraelTransitCardEditor extends LitElement {
 
   // -- the rest of the options ----------------------------------------------
 
-  _onFormChange(ev) {
-    ev.stopPropagation();
-    this._emit({ ...this._config, ...ev.detail.value });
-  }
-
   _emit(config) {
     this._config = compact(config);
     fireEvent(this, "config-changed", { config: this._config });
   }
 
-  get _schema() {
-    const hasRail = this._routes.some((route) => route.route_type === "2");
-    const toggles = [
-      "show_header",
-      "show_city",
-      "show_stop_code",
-      "show_destination",
-      "show_operator",
-      "show_mode_icon",
-      "show_realtime_tag",
-      "show_platform",
-      "show_delay",
-      "show_clock",
-    ];
-
-    return [
-      { name: "title", selector: { text: {} } },
-      {
-        name: "",
-        type: "grid",
-        schema: [
-          {
-            name: "max_arrivals",
-            selector: { number: { min: 1, max: 20, step: 1, mode: "box" } },
-          },
-          {
-            name: "max_lines",
-            selector: { number: { min: 0, max: 20, step: 1, mode: "box" } },
-          },
-        ],
-      },
-      // Only meaningful once there is a chosen order to follow.
-      ...(this._lines.length
-        ? [
-            {
-              name: "order",
-              selector: {
-                select: {
-                  mode: "dropdown",
-                  options: [
-                    { value: "time", label: this._t("editorOrderTime") },
-                    { value: "lines", label: this._t("editorOrderLines") },
-                  ],
-                },
-              },
-            },
-          ]
-        : []),
-      {
-        name: "",
-        type: "expandable",
-        title: this._t("editorDisplay"),
-        icon: "mdi:eye-settings-outline",
-        schema: [
-          {
-            name: "",
-            type: "grid",
-            schema: toggles.map((name) => ({ name, selector: { boolean: {} } })),
-          },
-          { name: "show_map", selector: { boolean: {} } },
-        ],
-      },
-      ...(hasRail ? [{ name: "rail_destination", selector: { text: {} } }] : []),
-    ];
+  _set(name, value) {
+    this._emit({ ...this._config, [name]: value });
   }
 
-  _computeLabel = (schema) => {
-    const labels = {
-      title: this._t("editorTitle"),
-      max_arrivals: this._t("editorMaxArrivals"),
-      max_lines: this._t("editorMaxLines"),
-      order: this._t("editorOrder"),
-      show_header: this._t("editorShowHeader"),
-      show_city: this._t("editorShowCity"),
-      show_stop_code: this._t("editorShowStopCode"),
-      show_destination: this._t("editorShowDestination"),
-      show_operator: this._t("editorShowOperator"),
-      show_mode_icon: this._t("editorShowModeIcon"),
-      show_realtime_tag: this._t("editorShowRealtimeTag"),
-      show_platform: this._t("editorShowPlatform"),
-      show_delay: this._t("editorShowDelay"),
-      show_clock: this._t("editorShowClock"),
-      show_map: this._t("editorShowMap"),
-      rail_destination: this._t("mode_2"),
-    };
-    return labels[schema.name] ?? schema.name;
-  };
+  /** A whole number within limits, or the default when the box is cleared. */
+  _setNumber(name, raw, min, max) {
+    const value = Number.parseInt(raw, 10);
+    this._set(name, Number.isNaN(value) ? DEFAULTS[name] : Math.min(max, Math.max(min, value)));
+  }
 
-  _computeHelper = (schema) => {
-    const helpers = {
-      max_lines: this._t("editorMaxLinesHelp"),
-      show_map: this._t("editorShowMapHelp"),
-    };
-    return helpers[schema.name];
-  };
+  get _value() {
+    return { ...DEFAULTS, ...this._config };
+  }
+
+  _renderText(name, label, helper) {
+    const id = `it-${name}`;
+    return html`<div class="field">
+      <label for=${id}>${label}</label>
+      <input
+        id=${id}
+        type="text"
+        .value=${this._config[name] ?? ""}
+        @change=${(ev) => this._set(name, ev.target.value.trim())}
+      />
+      ${helper ? html`<span class="hint">${helper}</span>` : nothing}
+    </div>`;
+  }
+
+  _renderNumber(name, label, min, max, helper) {
+    const id = `it-${name}`;
+    return html`<div class="field">
+      <label for=${id}>${label}</label>
+      <input
+        id=${id}
+        type="number"
+        inputmode="numeric"
+        min=${min}
+        max=${max}
+        step="1"
+        .value=${String(this._value[name])}
+        @change=${(ev) => this._setNumber(name, ev.target.value, min, max)}
+      />
+      ${helper ? html`<span class="hint">${helper}</span>` : nothing}
+    </div>`;
+  }
+
+  _renderSwitch(name, label, helper) {
+    const id = `it-${name}`;
+    return html`<label class="switch-row" for=${id}>
+      <span class="switch-text">
+        <span>${label}</span>
+        ${helper ? html`<span class="hint">${helper}</span>` : nothing}
+      </span>
+      <input
+        id=${id}
+        class="switch"
+        type="checkbox"
+        role="switch"
+        .checked=${Boolean(this._value[name])}
+        @change=${(ev) => this._set(name, ev.target.checked)}
+      />
+    </label>`;
+  }
+
+  _renderOptions() {
+    const hasRail = this._routes.some((route) => String(route.route_type) === "2");
+    const toggles = [
+      ["show_header", "editorShowHeader"],
+      ["show_city", "editorShowCity"],
+      ["show_stop_code", "editorShowStopCode"],
+      ["show_destination", "editorShowDestination"],
+      ["show_operator", "editorShowOperator"],
+      ["show_mode_icon", "editorShowModeIcon"],
+      ["show_realtime_tag", "editorShowRealtimeTag"],
+      ["show_platform", "editorShowPlatform"],
+      ["show_delay", "editorShowDelay"],
+      ["show_clock", "editorShowClock"],
+    ];
+    return html`
+      ${this._renderText("title", this._t("editorTitle"))}
+      <div class="grid">
+        ${this._renderNumber("max_arrivals", this._t("editorMaxArrivals"), 1, 20)}
+        ${this._renderNumber("max_lines", this._t("editorMaxLines"), 0, 20, this._t("editorMaxLinesHelp"))}
+      </div>
+      ${this._lines.length
+        ? html`<div class="field">
+            <label for="it-order">${this._t("editorOrder")}</label>
+            <select id="it-order" @change=${(ev) => this._set("order", ev.target.value)}>
+              <option value="time" ?selected=${this._value.order !== "lines"}>
+                ${this._t("editorOrderTime")}
+              </option>
+              <option value="lines" ?selected=${this._value.order === "lines"}>
+                ${this._t("editorOrderLines")}
+              </option>
+            </select>
+          </div>`
+        : nothing}
+      ${this._renderSwitch("show_map", this._t("editorShowMap"), this._t("editorShowMapHelp"))}
+      <details class="expandable">
+        <summary>
+          ${icon(ICONS.chevron, { size: 20, cls: "icon summary-chevron" })}
+          <span>${this._t("editorDisplay")}</span>
+        </summary>
+        <div class="switches">
+          ${toggles.map(([name, key]) => this._renderSwitch(name, this._t(key)))}
+        </div>
+      </details>
+      ${hasRail ? this._renderText("rail_destination", this._t("mode_2")) : nothing}
+    `;
+  }
 
   // -- rendering -------------------------------------------------------------
 
@@ -580,15 +721,7 @@ export class IsraelTransitCardEditor extends LitElement {
         ${needsPicker ? this._renderSearch() : this._renderSelected()}
         ${this._config.stop_code
           ? html`
-              ${this._renderLines()}
-              <ha-form
-                .hass=${this.hass}
-                .data=${{ ...DEFAULTS, ...this._config }}
-                .schema=${this._schema}
-                .computeLabel=${this._computeLabel}
-                .computeHelper=${this._computeHelper}
-                @value-changed=${this._onFormChange}
-              ></ha-form>
+              ${this._renderLines()} ${this._renderOptions()}
             `
           : nothing}
       </div>
@@ -599,7 +732,7 @@ export class IsraelTransitCardEditor extends LitElement {
     const stop = this._stop || { code: this._config.stop_code };
     return html`
       <div class="selected">
-        <ha-icon icon="mdi:bus-stop"></ha-icon>
+        ${icon(ICONS.busStop, { size: 24 })}
         <div class="selected-body">
           <div class="selected-name">${stop.name || this._t("stop")}</div>
           <div class="selected-sub">
@@ -625,7 +758,7 @@ export class IsraelTransitCardEditor extends LitElement {
                 aria-label=${this._t("editorCancel")}
                 @click=${this._close}
               >
-                <ha-icon icon="mdi:close"></ha-icon>
+                ${icon(ICONS.close)}
               </button>`
             : nothing}
         </div>
@@ -714,7 +847,7 @@ export class IsraelTransitCardEditor extends LitElement {
             aria-label=${this._t("editorMoveUp")}
             @click=${() => this._move(index, -1)}
           >
-            <ha-icon icon="mdi:arrow-up"></ha-icon>
+            ${icon(ICONS.arrowUp)}
           </button>
           <button
             class="tool"
@@ -723,7 +856,7 @@ export class IsraelTransitCardEditor extends LitElement {
             aria-label=${this._t("editorMoveDown")}
             @click=${() => this._move(index, 1)}
           >
-            <ha-icon icon="mdi:arrow-down"></ha-icon>
+            ${icon(ICONS.arrowDown)}
           </button>
           <button
             class="tool"
@@ -731,7 +864,7 @@ export class IsraelTransitCardEditor extends LitElement {
             aria-label=${this._t("editorRemove")}
             @click=${() => this._removeLine(index)}
           >
-            <ha-icon icon="mdi:close"></ha-icon>
+            ${icon(ICONS.close)}
           </button>
         </div>
       </div>

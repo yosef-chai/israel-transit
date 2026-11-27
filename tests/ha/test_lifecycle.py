@@ -138,8 +138,11 @@ async def test_the_card_and_the_brand_are_both_served(hass: HomeAssistant) -> No
     static = await _register_card(hass, _Resources())
 
     served = {config.url_path: Path(config.path) for config in static.await_args[0][0]}
-    assert served.keys() == {CARD_URL, BRAND_URL}
+    vendor = f"/{DOMAIN}/vendor"
+    assert served.keys() == {CARD_URL, BRAND_URL, vendor}
     assert served[CARD_URL].name == CARD_FILENAME
+    # The card imports MapLibre from beside itself, out of a versioned folder.
+    assert any(served[vendor].glob("maplibre-*/maplibre-gl.mjs"))
     # Home Assistant itself looks for exactly this directory, and the icon in
     # it, when it renders the integration.
     assert served[BRAND_URL].name == "brand"

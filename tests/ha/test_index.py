@@ -26,6 +26,7 @@ from custom_components.israel_transit.const import (
 )
 from custom_components.israel_transit.gtfs import (
     MEMBERS,
+    OPTIONAL_MEMBERS,
     GtfsError,
     ZipMember,
     build_index,
@@ -56,7 +57,7 @@ async def test_an_existing_index_is_opened(built_index: GtfsIndex) -> None:
     assert built_index.available is True
 
 
-async def test_an_index_from_an_older_schema_is_refused(
+async def test_an_index_older_than_the_queries_can_read_is_refused(
     built_index: GtfsIndex,
 ) -> None:
     """Otherwise the first query crashes on a column that is not there."""
@@ -282,7 +283,8 @@ async def test_a_full_refresh_downloads_the_members_and_builds_the_index(
     feed = write_feed(tmp_path)
 
     members = {
-        name: ZipMember(name, feed[name].stat().st_size, 0, 0) for name in MEMBERS
+        name: ZipMember(name, feed[name].stat().st_size, 0, 0)
+        for name in (*MEMBERS, *OPTIONAL_MEMBERS)
     }
     fetched: list[str] = []
 
@@ -304,7 +306,7 @@ async def test_a_full_refresh_downloads_the_members_and_builds_the_index(
         index._downloader.async_version.return_value.size = 1234
         assert await index.async_refresh(frozenset({21023})) is True
 
-    assert sorted(fetched) == sorted(MEMBERS)
+    assert sorted(fetched) == sorted((*MEMBERS, *OPTIONAL_MEMBERS))
     assert index.available is True
     assert index.last_build is not None
     assert index.last_build["stops"] == 4
@@ -313,7 +315,89 @@ async def test_a_full_refresh_downloads_the_members_and_builds_the_index(
     # And it is genuinely queryable afterwards.
     stop = await index.async_stop(35962)
     assert stop is not None and stop.name == "הקוממיות"
+    assert await index.async_route_shape(34447) is not None
+    assert index.built is not None
     await index.async_close()
+
+
+async def test_a_feed_without_the_optional_members_still_builds(
+    hass: HomeAssistant, tmp_path: Path
+) -> None:
+    """shapes.txt only adds the map; a feed without it is still a timetable."""
+    index = GtfsIndex(hass)
+    index.db_path.unlink(missing_ok=True)
+    feed = write_feed(tmp_path, {"shapes.txt": None})
+    members = {
+        name: ZipMember(name, feed[name].stat().st_size, 0, 0) for name in MEMBERS
+    }
+
+    async def fake_fetch(member: ZipMember, target: Path) -> int:
+        target.write_bytes(feed[member.name].read_bytes())
+        return member.compress_size
+
+    with patch.object(
+        index,
+        "_downloader",
+        **{
+            "async_version": AsyncMock(),
+            "async_members": AsyncMock(return_value=members),
+            "async_fetch_member": AsyncMock(side_effect=fake_fetch),
+        },
+    ):
+        index._downloader.async_version.return_value.token = "v9"
+        index._downloader.async_version.return_value.size = 1234
+        assert await index.async_refresh(frozenset({21023})) is True
+
+    assert index.last_build is not None and index.last_build["shapes"] == 0
+    assert await index.async_route_shape(34447) is None
+    await index.async_close()
+
+
+async def test_a_schema_2_index_keeps_answering_until_it_is_rebuilt(
+    built_index: GtfsIndex, tmp_path: Path
+) -> None:
+    """An upgrade must not leave every card without a timetable for a build.
+
+    The feed and the stops are unchanged, so only the schema calls for the
+    rebuild that follows.
+    """
+    writable = sqlite3.connect(built_index.db_path)
+    writable.execute("UPDATE meta SET value='2' WHERE key='schema'")
+    writable.execute("DROP TABLE shapes")
+    writable.execute("ALTER TABLE routes DROP COLUMN shape_id")
+    writable.commit()
+    writable.close()
+
+    assert await built_index.async_load() is True
+    assert (await built_index.async_stop(21023)) is not None
+    assert await built_index.async_route_shape(34447) is None
+
+    feed = write_feed(tmp_path)
+    members = {
+        name: ZipMember(name, feed[name].stat().st_size, 0, 0)
+        for name in (*MEMBERS, *OPTIONAL_MEMBERS)
+    }
+
+    async def fake_fetch(member: ZipMember, target: Path) -> int:
+        target.write_bytes(feed[member.name].read_bytes())
+        return member.compress_size
+
+    with patch.object(
+        built_index,
+        "_downloader",
+        **{
+            "async_version": AsyncMock(),
+            "async_members": AsyncMock(return_value=members),
+            "async_fetch_member": AsyncMock(side_effect=fake_fetch),
+        },
+    ):
+        built_index._downloader.async_version.return_value.token = "v1"
+        built_index._downloader.async_version.return_value.size = 1234
+        assert await built_index.async_refresh(frozenset({21023})) is True
+        # Now current: the same feed and stops are left alone.
+        assert await built_index.async_refresh(frozenset({21023})) is False
+
+    assert await built_index.async_route_shape(34447) is not None
 
 
 async def test_a_feed_missing_a_member_is_refused(
@@ -450,7 +534,8 @@ async def test_the_index_keeps_answering_while_a_rebuild_runs(
     assert await built_index.async_load() is True
     feed = write_feed(tmp_path)
     members = {
-        name: ZipMember(name, feed[name].stat().st_size, 0, 0) for name in MEMBERS
+        name: ZipMember(name, feed[name].stat().st_size, 0, 0)
+        for name in (*MEMBERS, *OPTIONAL_MEMBERS)
     }
     staging = asyncio.Event()
     release = asyncio.Event()

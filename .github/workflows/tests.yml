@@ -72,6 +72,8 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      - name: Map geometry
+        run: node --test "tests/js/*.test.mjs"
       - run: npm run build
       - name: The committed bundle matches the sources
         run: git diff --exit-code -- custom_components/israel_transit/www/

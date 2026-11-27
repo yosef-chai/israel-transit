@@ -9,7 +9,9 @@
     "watch": "node esbuild.config.mjs --watch"
   },
   "devDependencies": {
+    "@mdi/js": "7.4.47",
     "esbuild": "^0.25.0",
-    "lit": "^3.2.1"
+    "lit": "^3.2.1",
+    "maplibre-gl": "6.19.0"
   }
 }

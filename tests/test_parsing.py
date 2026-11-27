@@ -34,6 +34,7 @@ CURLBUS_STOP_21023 = {
                 "vehicle_ref": "36760701",
                 "eta": "2026-08-30 22:06:00+03:00",
                 "departed": "2026-08-30 21:40:00+03:00",
+                "timestamp": "2026-08-30 22:01:30+03:00",
                 "location": {"lat": "32.073905", "lon": "34.783706"},
                 "static_info": {
                     "route": {
@@ -137,6 +138,15 @@ def test_parse_curlbus_reads_stop_and_arrivals():
     assert api.localized(first.destination) == "מסוף אור יהודה/הורדה"
     assert first.vehicle_lat == pytest.approx(32.073905)
     assert first.departed is not None
+
+
+def test_parse_curlbus_reads_when_the_vehicle_was_last_seen():
+    """The card ages a vehicle's position by this, not by the browser clock."""
+    _, arrivals = api.parse_curlbus(CURLBUS_STOP_21023)
+
+    seen, unseen = (arrival.as_dict()["vehicle_seen"] for arrival in arrivals)
+    assert seen == "2026-08-30T22:01:30+03:00"
+    assert unseen is None
 
 
 def test_parse_curlbus_sorts_by_arrival_time():

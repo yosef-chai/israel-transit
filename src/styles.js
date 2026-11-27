@@ -1,38 +1,50 @@
 import { css, unsafeCSS } from "lit";
 
-import { MODE_HEX, UNKNOWN_HEX } from "./util.js";
+import { MODE_COLORS, UNKNOWN_COLORS } from "./util.js";
 
-// Everything here is built on Home Assistant's own design tokens so the card
-// follows the active theme, and on logical properties so it mirrors correctly
-// when Home Assistant switches the document to RTL for Hebrew.
+// Built on Home Assistant's design tokens (--ha-space-*, --ha-font-*,
+// --ha-border-radius-*) and its semantic and theme colours, each with a
+// fallback for releases or themes that do not set it, so the card follows the
+// active theme and dark mode. Logical properties keep it right in RTL.
 
-// Derived from the same table the map paints with, so a colour can never be
-// right in one place and stale in the other.
-export const MODE_COLORS = unsafeCSS(
-  Object.entries(MODE_HEX)
-    .map(([type, hex]) => `--it-mode-${type}: ${hex};`)
-    .join("\n    ") + `\n    --it-mode-unknown: var(--primary-color, ${UNKNOWN_HEX});`,
+// Badges carry white text, so they take the darker colour of each pair in
+// both themes (at least 4.5:1); see util.js.
+const MODE_VARS = unsafeCSS(
+  Object.entries(MODE_COLORS)
+    .map(([type, [light]]) => `--it-mode-${type}: ${light};`)
+    .join("\n    ") + `\n    --it-mode-unknown: ${UNKNOWN_COLORS[0]};`,
 );
 
 export const sharedStyles = css`
   :host {
-    ${MODE_COLORS}
-    --it-gap: 12px;
-    --it-radius: 12px;
+    ${MODE_VARS}
     display: block;
+  }
+
+  .icon {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  /* Points the same way as the text in both directions. */
+  :host(:dir(rtl)) .flip {
+    transform: scaleX(-1);
   }
 
   .badge {
     flex: 0 0 auto;
+    box-sizing: border-box;
     min-width: 44px;
-    padding: 4px 8px;
-    border-radius: 8px;
+    height: 28px;
+    padding-inline: var(--ha-space-2, 8px);
+    border-radius: var(--ha-border-radius-pill, 9999px);
     background: var(--it-badge-color, var(--it-mode-unknown));
     color: #fff;
-    font-weight: 700;
-    font-size: 1rem;
-    line-height: 1.25;
+    font-size: var(--ha-font-size-m, 14px);
+    font-weight: var(--ha-font-weight-bold, 700);
+    line-height: 28px;
     text-align: center;
+    white-space: nowrap;
     font-variant-numeric: tabular-nums;
     /* Line numbers stay left-to-right even inside an RTL layout. */
     direction: ltr;
@@ -42,9 +54,7 @@ export const sharedStyles = css`
   .tag {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 0.75rem;
-    line-height: 1.3;
+    gap: var(--ha-space-1, 4px);
     white-space: nowrap;
   }
 
@@ -52,20 +62,118 @@ export const sharedStyles = css`
     color: var(--secondary-text-color);
   }
 
+  .ltr {
+    direction: ltr;
+    unicode-bidi: isolate;
+    font-variant-numeric: tabular-nums;
+  }
 
-  .muted {
-    color: var(--secondary-text-color);
+  /* -- states: loading, empty, error, stale -- */
+
+  .skeleton {
+    display: flex;
+    align-items: center;
+    gap: var(--ha-space-4, 16px);
+    min-height: 48px;
+    padding: var(--ha-space-3, 12px) var(--ha-space-4, 16px);
+    box-sizing: border-box;
+    animation: fade-in 300ms ease-in;
+  }
+
+  .bone {
+    border-radius: var(--ha-border-radius-sm, 4px);
+    background: var(--ha-color-fill-neutral-quiet-resting, rgba(127, 127, 127, 0.14));
+  }
+
+  .bone.pill {
+    width: 44px;
+    height: 28px;
+    border-radius: var(--ha-border-radius-pill, 9999px);
+  }
+
+  .bone.text {
+    flex: 1 1 auto;
+    height: 12px;
+  }
+
+  .bone.eta {
+    width: 32px;
+    height: 20px;
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton {
+      animation: none;
+    }
   }
 
   .empty {
-    padding: 24px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--ha-space-2, 8px);
+    max-width: 500px;
+    margin-inline: auto;
+    padding: var(--ha-space-6, 24px) var(--ha-space-4, 16px);
     text-align: center;
     color: var(--secondary-text-color);
   }
 
-  .error {
-    padding: 12px 16px;
-    color: var(--error-color, #db4437);
+  .empty .icon {
+    color: var(--secondary-text-color);
+    opacity: 0.8;
+  }
+
+  .empty-title {
+    margin: 0;
+    font-size: var(--ha-font-size-l, 16px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    line-height: var(--ha-line-height-condensed, 1.2);
+    color: var(--primary-text-color);
+  }
+
+  .empty-text {
+    margin: 0;
+    font-size: var(--ha-font-size-m, 14px);
+    line-height: var(--ha-line-height-normal, 1.6);
+  }
+
+  /* Home Assistant's alert, narrow variant: the colour of its kind at 12%
+     behind it, an icon that says the same thing as the colour. */
+  .alert {
+    --it-alert: var(--info-color, #039be5);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--ha-space-2, 8px);
+    padding: var(--ha-space-2, 8px) var(--ha-space-3, 12px);
+    border-radius: var(--ha-border-radius-sm, 4px);
+    background: rgba(127, 127, 127, 0.12);
+    background: color-mix(in srgb, var(--it-alert) 12%, transparent);
+    color: var(--primary-text-color);
+    font-size: var(--ha-font-size-s, 12px);
+    line-height: var(--ha-line-height-normal, 1.6);
+  }
+
+  .alert .icon {
+    color: var(--it-alert);
+  }
+
+  .alert.error {
+    --it-alert: var(--error-color, #db4437);
+  }
+
+  .alert.warning {
+    --it-alert: var(--warning-color, #ffa600);
+  }
+
+  .alert.info {
+    --it-alert: var(--info-color, #039be5);
   }
 `;
 
@@ -80,21 +188,25 @@ export const cardStyles = css`
 
   .header {
     display: flex;
-    align-items: flex-start;
-    gap: var(--it-gap);
-    padding: 16px 16px 12px;
-    cursor: pointer;
+    align-items: center;
+    gap: var(--ha-space-3, 12px);
+    width: 100%;
+    min-height: 48px;
+    padding: var(--ha-space-4, 16px) var(--ha-space-4, 16px) var(--ha-space-2, 8px);
     border: none;
     background: none;
     color: inherit;
     font: inherit;
     text-align: start;
-    width: 100%;
+    cursor: pointer;
+    box-sizing: border-box;
   }
 
-  .header:focus-visible {
-    outline: 2px solid var(--primary-color);
+  .header:focus-visible,
+  .row:focus-visible {
+    outline: 2px solid var(--ha-color-focus, var(--primary-color));
     outline-offset: -2px;
+    border-radius: var(--ha-card-border-radius, 12px);
   }
 
   .titles {
@@ -103,9 +215,9 @@ export const cardStyles = css`
   }
 
   .stop-name {
-    font-size: 1.25rem;
-    font-weight: 500;
-    line-height: 1.3;
+    font-size: var(--ha-font-size-xl, 20px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    line-height: var(--ha-line-height-condensed, 1.2);
     color: var(--primary-text-color);
     overflow-wrap: anywhere;
   }
@@ -113,30 +225,26 @@ export const cardStyles = css`
   .stop-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-block-start: 2px;
-    font-size: 0.8125rem;
+    flex-wrap: wrap;
+    gap: var(--ha-space-2, 8px);
+    margin-block-start: var(--ha-space-1, 4px);
+    font-size: var(--ha-font-size-s, 12px);
     color: var(--secondary-text-color);
   }
 
   .code {
-    padding: 1px 6px;
-    border-radius: 6px;
-    background: var(--ha-color-surface-low, rgba(127, 127, 127, 0.16));
-    font-variant-numeric: tabular-nums;
-    direction: ltr;
-    unicode-bidi: isolate;
+    padding: 0 var(--ha-space-2, 8px);
+    border-radius: var(--ha-border-radius-pill, 9999px);
+    background: var(--ha-color-fill-neutral-quiet-resting, rgba(127, 127, 127, 0.14));
+    line-height: 20px;
   }
 
-  /* Over a board that is still shown: the times are real, just not fresh. */
-  .stale {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 16px;
-    font-size: 0.75rem;
-    color: var(--warning-color, #ffa600);
-    --mdc-icon-size: 16px;
+  .header .info {
+    color: var(--secondary-text-color);
+  }
+
+  .notice {
+    padding: 0 var(--ha-space-4, 16px) var(--ha-space-2, 8px);
   }
 
   .rows {
@@ -144,30 +252,40 @@ export const cardStyles = css`
     flex-direction: column;
     flex: 1 1 auto;
     overflow-y: auto;
+    padding-block-end: var(--ha-space-2, 8px);
   }
 
   .row {
     display: flex;
     align-items: center;
-    gap: var(--it-gap);
-    padding: 10px 16px;
+    gap: var(--ha-space-3, 12px);
+    width: 100%;
+    min-height: 56px;
+    padding: var(--ha-space-2, 8px) var(--ha-space-4, 16px);
     border: none;
-    border-top: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
     background: none;
     color: inherit;
     font: inherit;
     text-align: start;
-    width: 100%;
     cursor: pointer;
+    box-sizing: border-box;
+    transition: background-color var(--ha-animation-duration-fast, 150ms);
+  }
+
+  .row + .row {
+    box-shadow: inset 0 1px 0 var(--divider-color, rgba(127, 127, 127, 0.2));
   }
 
   .row:hover {
-    background: var(--ha-color-surface-lower, rgba(127, 127, 127, 0.08));
+    background: var(--ha-color-fill-neutral-quiet-hover, rgba(127, 127, 127, 0.08));
   }
 
-  .row:focus-visible {
-    outline: 2px solid var(--primary-color);
-    outline-offset: -2px;
+  .row:active {
+    background: var(--ha-color-fill-neutral-quiet-active, rgba(127, 127, 127, 0.14));
+  }
+
+  .mode {
+    color: var(--secondary-text-color);
   }
 
   .row-body {
@@ -176,7 +294,9 @@ export const cardStyles = css`
   }
 
   .destination {
-    font-size: 0.9375rem;
+    font-size: var(--ha-font-size-m, 14px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    line-height: var(--ha-line-height-condensed, 1.2);
     color: var(--primary-text-color);
     white-space: nowrap;
     overflow: hidden;
@@ -187,13 +307,10 @@ export const cardStyles = css`
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 2px 6px;
-    margin-block-start: 2px;
-    font-size: 0.75rem;
-    color: var(--secondary-text-color);
-  }
-
-  .sep {
+    gap: 0 var(--ha-space-1, 4px);
+    margin-block-start: var(--ha-space-1, 4px);
+    font-size: var(--ha-font-size-s, 12px);
+    line-height: var(--ha-line-height-condensed, 1.2);
     color: var(--secondary-text-color);
   }
 
@@ -201,54 +318,67 @@ export const cardStyles = css`
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    min-width: 52px;
-    line-height: 1.1;
+    align-items: flex-end;
+    min-width: 48px;
+    text-align: end;
+  }
+
+  .eta-main {
+    display: flex;
+    align-items: baseline;
+    gap: var(--ha-space-1, 4px);
   }
 
   .eta-value {
-    font-size: 1.5rem;
-    font-weight: 500;
+    font-size: var(--ha-font-size-xl, 20px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    line-height: var(--ha-line-height-condensed, 1.2);
     color: var(--primary-text-color);
     font-variant-numeric: tabular-nums;
   }
 
   .eta-unit {
-    font-size: 0.6875rem;
+    font-size: var(--ha-font-size-s, 12px);
     color: var(--secondary-text-color);
   }
 
   .eta-now .eta-value {
-    font-size: 1.0625rem;
+    font-size: var(--ha-font-size-l, 16px);
     color: var(--success-color, #43a047);
   }
 
   .eta-clock {
-    font-size: 1.0625rem;
+    font-size: var(--ha-font-size-l, 16px);
   }
 
-  .at-clock {
-    font-size: 0.6875rem;
+  .eta-extra {
+    display: flex;
+    align-items: center;
+    gap: var(--ha-space-1, 4px);
+    margin-block-start: 2px;
+    font-size: var(--ha-font-size-xs, 10px);
     color: var(--secondary-text-color);
-    font-variant-numeric: tabular-nums;
-    direction: ltr;
-    unicode-bidi: isolate;
   }
 
-  .mode {
-    flex: 0 0 auto;
-    --mdc-icon-size: 20px;
-    color: var(--secondary-text-color);
+  .live {
+    color: var(--success-color, #43a047);
   }
 
   .delay {
-    font-size: 0.6875rem;
-    font-weight: 500;
-    color: var(--warning-color, #ffa600);
-    font-variant-numeric: tabular-nums;
-    /* Keep "+4" from being reordered to "4+" inside an RTL line. */
-    direction: ltr;
-    unicode-bidi: isolate;
+    font-weight: var(--ha-font-weight-medium, 500);
+    color: var(--ha-color-text-warning, var(--warning-color, #ffa600));
+  }
+
+  .chevron {
+    color: var(--secondary-text-color);
+    margin-inline-start: calc(-1 * var(--ha-space-1, 4px));
+  }
+
+  /* Times that stopped updating: still the last real answer, so they stay,
+     but greyed until a fresh one arrives. */
+  .rows.stale .eta,
+  .rows.stale .live {
+    opacity: 0.55;
   }
 
   /* Genuinely narrow dashboard columns: drop to the essentials. A
@@ -256,19 +386,19 @@ export const cardStyles = css`
   @container (max-width: 290px) {
     .header,
     .row {
-      padding-inline: 12px;
+      padding-inline: var(--ha-space-3, 12px);
+    }
+    .row {
+      gap: var(--ha-space-2, 8px);
     }
     .sub .operator,
-    /* and the separator it would otherwise leave stranded */
     .sub .operator + .sep,
-    .mode {
+    .mode,
+    .chevron {
       display: none;
     }
-    .eta {
-      min-width: 44px;
-    }
     .eta-value {
-      font-size: 1.25rem;
+      font-size: var(--ha-font-size-l, 16px);
     }
   }
 `;

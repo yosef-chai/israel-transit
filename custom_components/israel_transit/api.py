@@ -150,6 +150,8 @@ class Arrival:
     departed: datetime | None = None
     platform: str | None = None
     delay_minutes: int | None = None
+    # מתי curlbus ראה את הרכב לאחרונה, כדי שהכרטיס ידע כמה המיקום ישן.
+    vehicle_seen: datetime | None = None
 
     def as_dict(self, lang: str = "he", now: datetime | None = None) -> dict[str, Any]:
         return {
@@ -167,6 +169,9 @@ class Arrival:
             "departed": self.departed.isoformat() if self.departed else None,
             "platform": self.platform,
             "delay_minutes": self.delay_minutes,
+            "vehicle_seen": (
+                self.vehicle_seen.isoformat() if self.vehicle_seen else None
+            ),
         }
 
 
@@ -291,6 +296,7 @@ def parse_curlbus(payload: dict[str, Any]) -> tuple[Stop | None, list[Arrival]]:
                     vehicle_lat=_as_float(location.get("lat")),
                     vehicle_lon=_as_float(location.get("lon")),
                     departed=parse_dt(visit.get("departed")),
+                    vehicle_seen=parse_dt(visit.get("timestamp")),
                 )
             )
 

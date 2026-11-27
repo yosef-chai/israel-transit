@@ -1,123 +1,71 @@
-import { LitElement, css, nothing, unsafeCSS } from "lit";
-import { html, unsafeStatic } from "lit/static-html.js";
+import { LitElement, css, html, nothing } from "lit";
 
+import { ICONS, icon, modePath } from "./icons.js";
 import { localize } from "./localize.js";
+import {
+  boundsOf,
+  createProgress,
+  focusPoints,
+  isPoint,
+  measureLine,
+  nearestStopIndex,
+  positionAge,
+  splitLine,
+  stopPoint,
+  stopPositions,
+  vehicleSplit,
+} from "./map-geometry.js";
 import { sharedStyles } from "./styles.js";
 import {
   DIALOG_CLOSED,
   DOMAIN,
+  MY_STOP_COLORS,
   errorMessage,
-  MY_STOP_HEX,
-  VEHICLE_HEX,
-  dialogTag,
   formatClock,
-  loadHaMap,
+  isDark,
   modeColor,
-  modeHex,
-  modeIcon,
   modeLabel,
+  modeMapColor,
 } from "./util.js";
 
-// ha-adaptive-dialog (Home Assistant 2026.3+) is a dialog on desktop and a
-// bottom sheet on small screens, which is exactly the responsive behaviour we
-// want. It and ha-dialog share the same open / header-title / closed contract,
-// so older installs fall back without any other change. See DialogBase._dialog
-// for when the choice is made.
+// A position older than this is shown as the last known one, not as live.
+const STALE_POSITION_S = 120;
+// How often an open route recounts the age of its vehicle's position, so the
+// age keeps growing when no new answer arrives.
+const AGE_TICK_MS = 15000;
+// Routes asked for recently, so reopening one is instant. A wall tablet can be
+// left open for weeks, hence the cap.
+const ROUTE_CACHE_SIZE = 40;
 
-// How far ahead of the vehicle the map frames when the rider's own stop is not
-// on this pattern, and the most it will stretch to reach that stop: past a
-// dozen stops the two ends are far enough apart that neither is legible.
-const AHEAD_STOPS = 6;
-const MAX_AHEAD_STOPS = 12;
-const MAP_ZOOM = 16;
-// Leaflet is a dynamic import inside ha-map. Until it lands ha-map centres
-// itself on home, so this checks often enough that the wrong view never
-// settles, and long enough to cover a cold import.
-const MAP_WAIT_MS = 40;
-const MAP_WAIT_TRIES = 50;
+const routeCache = new Map();
+let cachedIndex = null;
 
-// ha-map draws every path point as a fixed 3 px dot, which makes a lone point
-// for the vehicle look exactly like one more stop on the line. A closed ring of
-// points is drawn as a circle instead, and reads as a marker at a glance. The
-// radius follows the framed span rather than being a fixed distance, so it
-// keeps roughly its size on screen whether the map shows two stops or twenty.
-const RING_POINTS = 16;
-const RING_SHARE = 0.045;
-const RING_MIN_M = 25;
-const RING_MAX_M = 220;
-
-const METRES_PER_DEGREE = 111320;
-
-/** A usable Date from an optional ISO string. */
-const _asDate = (iso, fallback) => {
-  const date = iso ? new Date(iso) : null;
-  return date && !Number.isNaN(date.getTime()) ? date : fallback;
+const cacheGet = (key) => {
+  const hit = routeCache.get(key);
+  if (hit) {
+    routeCache.delete(key);
+    routeCache.set(key, hit);
+  }
+  return hit;
 };
 
-const located = (stop) => stop.lat != null && stop.lon != null;
-const coords = (stop) => [stop.lat, stop.lon];
-
-/** Metres between two coordinates -- close enough for "which stop is it at". */
-const distance = (aLat, aLon, bLat, bLon) => {
-  const toRad = (deg) => (deg * Math.PI) / 180;
-  const dLat = toRad(bLat - aLat);
-  const dLon = toRad(bLon - aLon) * Math.cos(toRad((aLat + bLat) / 2));
-  return 6371000 * Math.sqrt(dLat * dLat + dLon * dLon);
+const cachePut = (key, value) => {
+  // A rebuilt timetable can change any route; nothing cached survives it.
+  if (value.index !== cachedIndex) {
+    routeCache.clear();
+    cachedIndex = value.index;
+  }
+  routeCache.set(key, value);
+  while (routeCache.size > ROUTE_CACHE_SIZE) {
+    routeCache.delete(routeCache.keys().next().value);
+  }
 };
 
-/** Which stop on the pattern the vehicle is sitting at, or -1 if unclear. */
-const nearestStopIndex = (stops, lat, lon) => {
-  if (lat == null || lon == null) return -1;
-  let best = -1;
-  let bestDistance = Infinity;
-  stops.forEach((stop, index) => {
-    if (!located(stop)) return;
-    const metres = distance(lat, lon, stop.lat, stop.lon);
-    if (metres < bestDistance) {
-      bestDistance = metres;
-      best = index;
-    }
-  });
-  // Past a couple of kilometres the vehicle is nowhere near this pattern, and
-  // claiming a stop would be worse than admitting we cannot tell.
-  return bestDistance <= 2000 ? best : -1;
-};
-
-/** The diagonal of what the map is about to frame, in metres. */
-const spanMetres = (points) => {
-  if (points.length < 2) return 0;
-  const lats = points.map((point) => point[0]);
-  const lons = points.map((point) => point[1]);
-  return distance(
-    Math.min(...lats),
-    Math.min(...lons),
-    Math.max(...lats),
-    Math.max(...lons),
-  );
-};
-
-const ringRadius = (focus) =>
-  Math.min(RING_MAX_M, Math.max(RING_MIN_M, spanMetres(focus) * RING_SHARE));
-
-/** A closed ring of coordinates, which ha-map draws as a circle. */
-const ringPath = (centre, metres, color, name, timestamp) => {
-  const [lat, lon] = centre;
-  const dLat = metres / METRES_PER_DEGREE;
-  // Longitude degrees shrink towards the poles; at Israel's latitude a degree
-  // of longitude is about 85% of a degree of latitude.
-  const dLon = dLat / Math.max(0.2, Math.cos((lat * Math.PI) / 180));
-  return {
-    points: Array.from({ length: RING_POINTS + 1 }, (_, step) => {
-      const angle = (step / RING_POINTS) * 2 * Math.PI;
-      return {
-        point: [lat + dLat * Math.sin(angle), lon + dLon * Math.cos(angle)],
-        timestamp,
-      };
-    }),
-    color,
-    name,
-  };
-};
+/** The answer to route_stops, from either the current or the older backend. */
+const normaliseRoute = (answer) =>
+  Array.isArray(answer)
+    ? { stops: answer, shape: null, index: null }
+    : { stops: answer?.stops ?? [], shape: answer?.shape ?? null, index: answer?.index ?? null };
 
 const dialogStyles = css`
   .list {
@@ -128,13 +76,14 @@ const dialogStyles = css`
   .item {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 2px;
-    border-top: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
+    gap: var(--ha-space-4, 16px);
+    min-height: 56px;
+    padding-block: var(--ha-space-2, 8px);
+    box-sizing: border-box;
   }
 
-  .item:first-child {
-    border-top: none;
+  .item + .item {
+    box-shadow: inset 0 1px 0 var(--divider-color, rgba(127, 127, 127, 0.2));
   }
 
   .item-body {
@@ -143,22 +92,131 @@ const dialogStyles = css`
   }
 
   .item-title {
+    font-size: var(--ha-font-size-m, 14px);
+    font-weight: var(--ha-font-weight-medium, 500);
     color: var(--primary-text-color);
     overflow-wrap: anywhere;
   }
 
   .item-sub {
-    margin-block-start: 2px;
-    font-size: 0.75rem;
+    margin-block-start: var(--ha-space-1, 4px);
+    font-size: var(--ha-font-size-s, 12px);
     color: var(--secondary-text-color);
+  }
+
+  .tag {
+    font-size: var(--ha-font-size-s, 12px);
+  }
+
+  israel-transit-map {
+    height: 260px;
+    margin-block-end: var(--ha-space-3, 12px);
+  }
+
+  /* A bottom sheet on a phone has far less room than a desktop dialog. */
+  @media (max-height: 700px) {
+    israel-transit-map {
+      height: 200px;
+    }
+  }
+
+  /* -- the status of the vehicle, under the map -- */
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: var(--ha-space-3, 12px);
+    margin-block-end: var(--ha-space-3, 12px);
+    padding: var(--ha-space-3, 12px);
+    border-radius: var(--ha-border-radius-lg, 12px);
+    background: var(--ha-color-fill-neutral-quiet-resting, rgba(127, 127, 127, 0.1));
+  }
+
+  .status-icon {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--it-badge-color, var(--it-mode-unknown));
+    color: #fff;
+  }
+
+  .status-icon.off {
+    background: var(--ha-color-fill-neutral-normal-resting, rgba(127, 127, 127, 0.3));
+    color: var(--secondary-text-color);
+  }
+
+  .status-body {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .status-title {
+    font-size: var(--ha-font-size-m, 14px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    line-height: var(--ha-line-height-condensed, 1.2);
+    color: var(--primary-text-color);
+  }
+
+  .status-sub {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--ha-space-2, 8px);
+    margin-block-start: var(--ha-space-1, 4px);
+    font-size: var(--ha-font-size-s, 12px);
+    color: var(--secondary-text-color);
+  }
+
+  .status-sub .stale {
+    color: var(--ha-color-text-warning, var(--warning-color, #ffa600));
+  }
+
+  .approx {
+    margin-block-end: var(--ha-space-3, 12px);
+  }
+
+  /* -- the stop timeline -- */
+
+  .timeline {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
   }
 
   .stop {
     display: grid;
-    grid-template-columns: 20px 1fr auto;
+    grid-template-columns: 28px 1fr auto;
     align-items: center;
-    gap: 12px;
-    padding-block: 8px;
+    gap: var(--ha-space-3, 12px);
+    width: 100%;
+    min-height: 48px;
+    padding: var(--ha-space-1, 4px) 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    box-sizing: border-box;
+  }
+
+  .stop:disabled {
+    cursor: default;
+  }
+
+  .stop:not(:disabled):hover {
+    background: var(--ha-color-fill-neutral-quiet-hover, rgba(127, 127, 127, 0.08));
+  }
+
+  .stop:focus-visible {
+    outline: 2px solid var(--ha-color-focus, var(--primary-color));
+    outline-offset: -2px;
+    border-radius: var(--ha-border-radius-md, 8px);
   }
 
   .track {
@@ -169,125 +227,94 @@ const dialogStyles = css`
     align-items: center;
   }
 
+  /* The line between stops, in the colour of the line. */
   .track::before {
     content: "";
     position: absolute;
-    inset-block: -8px;
-    width: 2px;
-    background: var(--divider-color, rgba(127, 127, 127, 0.35));
+    inset-block: -4px;
+    width: 4px;
+    border-radius: 2px;
+    background: var(--it-badge-color, var(--it-mode-unknown));
   }
 
-  .stop:first-child .track::before {
+  li:first-child .track::before {
     inset-block-start: 50%;
   }
 
-  .stop:last-child .track::before {
+  li:last-child .track::before {
     inset-block-end: 50%;
   }
 
   .node {
     position: relative;
-    width: 11px;
-    height: 11px;
+    box-sizing: border-box;
+    width: 12px;
+    height: 12px;
+    border: 3px solid var(--it-badge-color, var(--it-mode-unknown));
     border-radius: 50%;
     background: var(--card-background-color, #fff);
-    border: 2px solid var(--divider-color, rgba(127, 127, 127, 0.6));
   }
 
-  /* The same two colours the map paints these with, so the list and the map
-     can be read as one picture. */
-  .stop.mine .node {
-    width: 15px;
-    height: 15px;
-    border-color: ${unsafeCSS(MY_STOP_HEX)};
+  .done .track::before,
+  .done .node {
+    opacity: 0.35;
   }
 
-  .stop.here .node {
-    width: 15px;
-    height: 15px;
-    background: ${unsafeCSS(VEHICLE_HEX)};
-    border-color: ${unsafeCSS(VEHICLE_HEX)};
+  .done .stop-title,
+  .done .time {
+    color: var(--secondary-text-color);
   }
 
-  .stop.here .stop-title,
-  .stop.mine .stop-title {
-    font-weight: 600;
+  .here .node,
+  .mine .node {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-width: 0;
+    background: var(--it-badge-color, var(--it-mode-unknown));
+    color: #fff;
+  }
+
+  .mine .node {
+    background: var(--it-mine);
   }
 
   .stop-title {
+    font-size: var(--ha-font-size-m, 14px);
+    line-height: var(--ha-line-height-condensed, 1.2);
     color: var(--primary-text-color);
     overflow-wrap: anywhere;
   }
 
+  .here .stop-title,
+  .mine .stop-title {
+    font-weight: var(--ha-font-weight-bold, 700);
+  }
+
   .stop-sub {
-    font-size: 0.75rem;
+    margin-block-start: 2px;
+    font-size: var(--ha-font-size-s, 12px);
     color: var(--secondary-text-color);
+  }
+
+  .stop-sub .mine-label {
+    font-weight: var(--ha-font-weight-medium, 500);
+    color: var(--primary-text-color);
   }
 
   .time {
-    font-size: 0.8125rem;
+    font-size: var(--ha-font-size-s, 12px);
     color: var(--secondary-text-color);
     font-variant-numeric: tabular-nums;
-  }
-
-  .note {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-block-end: 12px;
-    padding: 10px 12px;
-    border-radius: 10px;
-    background: var(--ha-color-surface-low, rgba(127, 127, 127, 0.12));
-    font-size: 0.8125rem;
-    color: var(--secondary-text-color);
-  }
-
-  ha-icon {
-    --mdc-icon-size: 20px;
-    flex: 0 0 auto;
-  }
-
-  ha-map {
-    height: 230px;
-    border-radius: var(--ha-card-border-radius, 12px);
-    overflow: hidden;
-  }
-
-  /* Says what each colour on the map means, which is cheaper than a marker
-     the map API has no way to label. */
-  .legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 14px;
-    margin-block: 8px 12px;
-    font-size: 0.75rem;
-    color: var(--secondary-text-color);
-  }
-
-  .key {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .key i {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    flex: 0 0 auto;
-  }
-
-  /* A bottom sheet on a phone has far less room than a desktop dialog. */
-  @media (max-height: 640px) {
-    ha-map {
-      height: 165px;
-    }
   }
 `;
 
 class DialogBase extends LitElement {
   static properties = {
     open: { type: Boolean },
+    opener: { attribute: false },
     _loading: { state: true },
     _error: { state: true },
   };
@@ -303,34 +330,24 @@ class DialogBase extends LitElement {
 
   /**
    * Home Assistant replaces this object on every state change in the whole
-   * instance. Nothing rendered here follows from it beyond the language and
-   * the connection, so it is a plain field: making it reactive would re-render
-   * an open dialog several times a second for no visible difference.
+   * instance. Only the language, the time settings and the theme change what
+   * a dialog shows, so those are all that ask for a render.
    */
   set hass(hass) {
     this._hass = hass;
+    const look = [hass?.language, hass?.locale?.language, hass?.locale?.time_format, isDark(hass)].join("|");
+    if (look !== this._look) {
+      this._look = look;
+      this.requestUpdate();
+    }
   }
 
   get hass() {
     return this._hass;
   }
 
-  /**
-   * The dialog element, chosen when this dialog first renders.
-   *
-   * Home Assistant registers ha-adaptive-dialog lazily, often after this
-   * card's module has loaded, so deciding at import time picked the fallback
-   * on installs that have the real thing. Each opening is a new element, so
-   * this is decided per opening -- and then held, since a tag that changed
-   * under an open dialog would rebuild it.
-   */
-  get _dialog() {
-    this.__dialog ??= unsafeStatic(dialogTag());
-    return this.__dialog;
-  }
-
-  _t(key) {
-    return localize(this.hass, key);
+  _t(key, values) {
+    return localize(this.hass, key, values);
   }
 
   _closed() {
@@ -341,11 +358,42 @@ class DialogBase extends LitElement {
     this.dispatchEvent(new CustomEvent(DIALOG_CLOSED));
   }
 
+  _renderDialog(heading, subheading, body) {
+    return html`<israel-transit-dialog
+      .heading=${heading}
+      .subheading=${subheading}
+      .closeLabel=${this._t("close")}
+      .opener=${this.opener}
+      .open=${this.open}
+      @closed=${this._closed}
+    >
+      ${body}
+    </israel-transit-dialog>`;
+  }
+
   /** Loading, error and empty all look the same wherever they appear. */
   _renderState(items, emptyKey) {
-    if (this._loading) return html`<div class="empty">${this._t("loading")}</div>`;
-    if (this._error) return html`<div class="error">${this._error}</div>`;
-    if (!items.length) return html`<div class="empty">${this._t(emptyKey)}</div>`;
+    if (this._loading) {
+      return html`<div role="progressbar" aria-label=${this._t("loading")} aria-busy="true">
+        ${[0, 1, 2].map(
+          () => html`<div class="skeleton" aria-hidden="true">
+            <span class="bone pill"></span><span class="bone text"></span>
+          </div>`,
+        )}
+      </div>`;
+    }
+    if (this._error) {
+      return html`<div class="alert error" role="alert">
+        ${icon(ICONS.alert, { size: 18 })}<span>${this._error}</span>
+      </div>`;
+    }
+    if (!items.length) {
+      return html`<div class="empty">
+        ${icon(ICONS.empty, { size: 40 })}
+        <p class="empty-title">${this._t("emptyTitle")}</p>
+        <p class="empty-text">${this._t(emptyKey)}</p>
+      </div>`;
+    }
     return null;
   }
 }
@@ -385,49 +433,35 @@ export class IsraelTransitStopDialog extends DialogBase {
   render() {
     const stop = this.stop || {};
     const state = this._renderState(this._routes, "noLines");
-
-    return html`
-      <${this._dialog}
-        header-title=${stop.name || this._t("stopDetails")}
-        header-subtitle=${[stop.city, stop.code].filter(Boolean).join(" · ")}
-        width="medium"
-        .open=${this.open}
-        @closed=${this._closed}
-      >
-        ${
-          state ??
-          html`<div class="list">
-            ${this._routes.map(
-              (route) => html`
-                <div class="item">
-                  <div
-                    class="badge"
-                    style=${`--it-badge-color:${modeColor(route.route_type)}`}
-                  >
-                    ${route.line_name}
-                  </div>
-                  <div class="item-body">
-                    <div class="item-title">${route.destination}</div>
-                    <div class="item-sub">
-                      ${[route.operator, modeLabel(this.hass, route.route_type)]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </div>
-                  </div>
-                  ${
-                    route.has_realtime
-                      ? nothing
-                      : html`<span class="tag timetable"
-                          >${this._t("scheduled")}</span
-                        >`
-                  }
+    return this._renderDialog(
+      stop.name || this._t("stopDetails"),
+      [stop.city, stop.code].filter(Boolean).join(" · "),
+      state ??
+        html`<div class="list" role="list" aria-label=${this._t("allLines")}>
+          ${this._routes.map(
+            (route) => html`
+              <div class="item" role="listitem">
+                <div class="badge" style=${`--it-badge-color:${modeColor(route.route_type)}`}>
+                  ${route.line_name}
                 </div>
-              `,
-            )}
-          </div>`
-        }
-      </${this._dialog}>
-    `;
+                <div class="item-body">
+                  <div class="item-title">${route.destination}</div>
+                  <div class="item-sub">
+                    ${[route.operator, modeLabel(this.hass, route.route_type)]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </div>
+                </div>
+                ${route.has_realtime
+                  ? nothing
+                  : html`<span class="tag timetable"
+                      >${icon(ICONS.timetable, { size: 14 })}${this._t("scheduled")}</span
+                    >`}
+              </div>
+            `,
+          )}
+        </div>`,
+    );
   }
 }
 
@@ -437,200 +471,176 @@ export class IsraelTransitRouteDialog extends DialogBase {
     arrival: { attribute: false },
     showMap: { attribute: false },
     stopCode: { attribute: false },
-    _stops: { state: true },
-    _mapReady: { state: true },
+    clockOffset: { attribute: false },
+    _route: { state: true },
+    _now: { state: true },
   };
 
   constructor() {
     super();
-    this._stops = [];
     this.showMap = true;
-    this._mapReady = false;
-    this._paths = [];
-    this._focus = [];
+    this.clockOffset = 0;
+    this._route = { stops: [], shape: null, index: null };
+    this._now = Date.now();
+    this._progress = createProgress();
+    this._request = 0;
   }
 
-  willUpdate(changed) {
-    // The card hands over a fresh arrival on every poll, so this recomputes
-    // whenever the vehicle moves -- and only then. Framing is decided first,
-    // because it is what sets the size of the markers drawn into it.
-    if (
-      changed.has("arrival") ||
-      changed.has("_stops") ||
-      changed.has("stopCode")
-    ) {
-      this._focus = this._computeFocus();
-      this._paths = this._computePaths();
-    }
-  }
-
-  updated(changed) {
-    if (changed.has("open") && this.open) this._load();
-    this._fitMap();
-  }
-
-  async _load() {
-    this._stops = [];
-    this._error = null;
-    if (!this.hass || !this.arrival?.line_ref) {
-      this._error = this._t("noRouteStops");
-      return;
-    }
-    this._loading = true;
-    if (this.showMap) {
-      loadHaMap().then((ready) => {
-        this._mapReady = ready;
-      });
-    }
-    try {
-      this._stops = await this.hass.callWS({
-        type: `${DOMAIN}/route_stops`,
-        line_ref: this.arrival.line_ref,
-        // Stop times are stored as offsets from the start of a run, so handing
-        // over this vehicle's departure turns them into its own times.
-        departed: this.arrival.departed || null,
-      });
-    } catch (err) {
-      this._error = errorMessage(this.hass, err);
-    } finally {
-      this._loading = false;
-    }
-  }
-
-  // -- the map -------------------------------------------------------------
-
-  get _located() {
-    return this._stops.filter(located);
-  }
-
-  get _vehiclePoint() {
-    const { vehicle_lat: lat, vehicle_lon: lon } = this.arrival || {};
-    return lat != null && lon != null ? [lat, lon] : null;
-  }
-
-  /** Where the vehicle is on this pattern, and where the rider is waiting. */
-  get _hereIndex() {
-    const { vehicle_lat: lat, vehicle_lon: lon } = this.arrival || {};
-    return nearestStopIndex(this._stops, lat, lon);
-  }
-
-  get _mineIndex() {
-    if (this.stopCode == null) return -1;
-    const code = Number(this.stopCode);
-    return this._stops.findIndex((stop) => Number(stop.code) === code);
-  }
-
-  /**
-   * What the map should frame.
-   *
-   * The stretch a rider actually cares about is from where the vehicle is now
-   * through to their own stop. Fitting the whole route instead would put both
-   * of those inside a couple of pixels on any intercity line.
-   */
-  _computeFocus() {
-    const vehicle = this._vehiclePoint;
-    const all = this._located.map(coords);
-    if (!vehicle) return all;
-
-    const here = this._hereIndex;
-    // Nowhere near this pattern: showing both is more honest than guessing.
-    if (here < 0) return [vehicle, ...all];
-
-    const mine = this._mineIndex;
-    const last =
-      mine > here ? Math.min(mine, here + MAX_AHEAD_STOPS) : here + AHEAD_STOPS;
-    const stretch = this._stops.slice(here, last + 1).filter(located).map(coords);
-    return [vehicle, ...(stretch.length ? stretch : all)];
-  }
-
-  /**
-   * The route as a line of stops, then the rider's stop and the vehicle as
-   * rings on top of it.
-   *
-   * ha-map paints on a canvas, so these carry literal colours rather than the
-   * theme variables the rest of the card uses. Order is paint order: the
-   * vehicle goes last so it is never hidden under the line.
-   */
-  _computePaths() {
-    if (!this.showMap) return [];
-    const arrival = this.arrival || {};
-    const now = new Date();
-    const radius = ringRadius(this._focus);
-    const paths = [];
-
-    const points = this._located.map((stop) => ({
-      point: coords(stop),
-      timestamp: _asDate(stop.arrival_time, now),
-    }));
-    if (points.length > 1) {
-      paths.push({
-        points,
-        color: modeHex(arrival.route_type),
-        name: `${arrival.line_name ?? ""} ${this._t("routeLine")}`.trim(),
-      });
-    }
-
-    const mine = this._stops[this._mineIndex];
-    if (mine && located(mine)) {
-      paths.push(
-        ringPath(coords(mine), radius, MY_STOP_HEX, this._t("myStop"), now),
-      );
-    }
-
-    const vehicle = this._vehiclePoint;
-    if (vehicle) {
-      paths.push(
-        ringPath(vehicle, radius, VEHICLE_HEX, this._t("vehicleMap"), now),
-      );
-    }
-    return paths;
-  }
-
-  /**
-   * ha-map's own auto-fit only looks at entities and layers, and this map has
-   * neither, so the framing is ours to set. Leaflet arrives by dynamic import,
-   * which is why this waits for it rather than assuming it is there.
-   */
-  _fitMap() {
-    const key = this._focus.length ? JSON.stringify(this._focus) : "";
-    if (!key || key === this._fitted) return;
-    const map = this.renderRoot.querySelector("ha-map");
-    if (!map) return;
-    if (!map.leafletMap) {
-      // One wait at a time: every render calls this, and each starting its
-      // own chain of retries piled dozens of timers onto one dialog.
-      if (!this._fitTimer && (this._fitTries ?? 0) < MAP_WAIT_TRIES) {
-        this._fitTries = (this._fitTries ?? 0) + 1;
-        this._fitTimer = setTimeout(() => {
-          this._fitTimer = undefined;
-          this._fitMap();
-        }, MAP_WAIT_MS);
-      }
-      return;
-    }
-    this._fitTries = 0;
-    map.fitBounds(this._focus, { zoom: MAP_ZOOM });
-    this._fitted = key;
+  connectedCallback() {
+    super.connectedCallback();
+    this._ageTimer = setInterval(() => (this._now = Date.now()), AGE_TICK_MS);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    clearTimeout(this._fitTimer);
-    this._fitTimer = undefined;
+    clearInterval(this._ageTimer);
+    this._progress.reset();
+    // Anything still on its way belongs to a dialog that is gone.
+    this._request += 1;
   }
 
-  _renderMap() {
-    if (!this.showMap || !this._mapReady || !this._paths.length) return nothing;
-    return html`
-      <ha-map .hass=${this.hass} .paths=${this._paths} .zoom=${MAP_ZOOM}></ha-map>
-      <div class="legend">
-        ${this._paths.map(
-          (path) => html`<span class="key"
-            ><i style=${`background:${path.color}`}></i>${path.name}</span
-          >`,
-        )}
-      </div>
-    `;
+  willUpdate(changed) {
+    // The card hands over a fresh arrival on every poll. The route is asked
+    // for again only when it is a different run: the line, or the departure
+    // its stop times are counted from.
+    if (changed.has("arrival") || changed.has("open")) {
+      const key = this._routeKey;
+      if (this.open && key !== this._loadedKey) this._load(key);
+    }
+    if (changed.has("arrival")) this._now = Date.now();
+  }
+
+  get _routeKey() {
+    const arrival = this.arrival || {};
+    return arrival.line_ref ? `${arrival.line_ref}|${arrival.departed ?? ""}` : "";
+  }
+
+  async _load(key) {
+    this._loadedKey = key;
+    this._error = null;
+    const arrival = this.arrival || {};
+    if (!this.hass || !arrival.line_ref) {
+      this._route = { stops: [], shape: null, index: null };
+      this._error = this._t("noRouteStops");
+      return;
+    }
+    const cached = cacheGet(key);
+    if (cached) {
+      this._route = cached;
+      return;
+    }
+    // Only the latest request may land: closing one line and opening another
+    // must not show the first one's route on the second one's map.
+    const request = ++this._request;
+    this._loading = !this._route.stops.length;
+    try {
+      const answer = normaliseRoute(
+        await this.hass.callWS({
+          type: `${DOMAIN}/route_stops`,
+          line_ref: arrival.line_ref,
+          // Stop times are stored as offsets from the start of a run, so
+          // handing over this vehicle's departure turns them into its own.
+          departed: arrival.departed || null,
+        }),
+      );
+      if (request !== this._request) return;
+      cachePut(key, answer);
+      this._route = answer;
+    } catch (err) {
+      if (request !== this._request) return;
+      this._error = errorMessage(this.hass, err);
+    } finally {
+      if (request === this._request) this._loading = false;
+    }
+  }
+
+  // -- what the map and the list show ----------------------------------------
+
+  get _vehiclePoint() {
+    const { vehicle_lat: lat, vehicle_lon: lon } = this.arrival || {};
+    const point = lat != null && lon != null ? [Number(lat), Number(lon)] : null;
+    return isPoint(point) ? point : null;
+  }
+
+  /** Everything the map and the timeline need, worked out once per render. */
+  _picture() {
+    const arrival = this.arrival || {};
+    const stops = this._route.stops || [];
+    const dark = isDark(this.hass);
+    const vehicle = this._vehiclePoint;
+    const here = nearestStopIndex(stops, vehicle);
+    const mineCode = this.stopCode == null ? null : Number(this.stopCode);
+    const mine = mineCode == null ? -1 : stops.findIndex((stop) => Number(stop.code) === mineCode);
+
+    const shape = (this._route.shape || []).filter(isPoint);
+    const dashed = shape.length < 2;
+    const line = measureLine(dashed ? stops.map(stopPoint).filter(isPoint) : shape);
+    const positions = stopPositions(line, stops);
+
+    // Where the vehicle is along the line, never moving backwards within one
+    // run of one vehicle.
+    const measured = vehicleSplit(line, positions, here, vehicle);
+    const subject = `${arrival.line_ref}|${arrival.vehicle_ref ?? ""}`;
+    const along = this._progress.update(subject, here, measured);
+    const { done, ahead } =
+      along != null && measured != null ? splitLine(line, along) : { done: [], ahead: line.points };
+    const passed = (index) =>
+      along != null && positions[index] != null ? positions[index] < along - 30 : index < here;
+
+    const age = vehicle ? positionAge(arrival.vehicle_seen, this.clockOffset ?? 0, this._now) : null;
+    const stale = age != null && age > STALE_POSITION_S;
+    const name = (index) => stops[index]?.name ?? "";
+
+    const view = {
+      dark,
+      dashed,
+      color: modeMapColor(arrival.route_type, dark),
+      mineColor: MY_STOP_COLORS[dark ? 1 : 0],
+      line: line.points,
+      done,
+      ahead,
+      stops: stops
+        .map((stop, index) => ({ point: stopPoint(stop), name: stop.name, done: passed(index) }))
+        .filter((stop, index) => isPoint(stop.point) && index !== mine),
+      mine:
+        mine >= 0 && isPoint(stopPoint(stops[mine]))
+          ? { point: stopPoint(stops[mine]), name: name(mine), label: `${this._t("myStop")}: ${name(mine)}` }
+          : null,
+      vehicle: vehicle
+        ? {
+            point: vehicle,
+            icon: modePath(arrival.route_type),
+            lineName: arrival.line_name,
+            stale,
+            label: this._t(stale ? "vehicleStale" : "vehicleOf", { line: arrival.line_name ?? "" }),
+          }
+        : null,
+      bounds: boundsOf(focusPoints({ stops, vehicle, hereIndex: here, mineIndex: mine })),
+      // Framed again when the vehicle reaches another stop, not on every
+      // sighting: between stops it moves on the map without the map moving.
+      fitKey: `${subject}|${here}|${mine}|${stops.length}|${shape.length}`,
+      subject,
+    };
+    return { view, here, mine, passed, age, stale, dashed, vehicle };
+  }
+
+  _strings() {
+    const t = (key) => this._t(key);
+    return {
+      unavailable: t("mapUnavailable"),
+      unsupported: t("mapUnsupported"),
+      failed: t("mapFailed"),
+      vendor: t("mapVendor"),
+      retry: t("retry"),
+      reload: t("reload"),
+      recenter: t("recenter"),
+      maplibre: {
+        "NavigationControl.ZoomIn": t("zoomIn"),
+        "NavigationControl.ZoomOut": t("zoomOut"),
+        "AttributionControl.ToggleAttribution": t("attribution"),
+        "Map.Title": t("mapLabel"),
+      },
+    };
   }
 
   /** Minutes into the run, for when no vehicle departure time is known. */
@@ -640,82 +650,130 @@ export class IsraelTransitRouteDialog extends DialogBase {
     return minutes ? `+${minutes} ${this._t("minutes")}` : "";
   }
 
+  _focusStop(stop) {
+    this.renderRoot.querySelector("israel-transit-map")?.focusOn(stopPoint(stop));
+  }
+
   render() {
     const arrival = this.arrival || {};
-    const here = this._hereIndex;
-    const mine = this._mineIndex;
-    const state = this._renderState(this._stops, "noRouteStops");
+    const stops = this._route.stops || [];
+    const picture = this._picture();
     const title = [modeLabel(this.hass, arrival.route_type), arrival.line_name]
       .filter(Boolean)
       .join(" ");
+    const state = this._renderState(stops, "noRouteStops");
+    const showMap = this.showMap && stops.length > 0;
 
-    return html`
-      <${this._dialog}
-        header-title=${`${title} · ${arrival.destination || ""}`}
-        header-subtitle=${[arrival.operator, this._t("routeStops")]
-          .filter(Boolean)
-          .join(" · ")}
-        width="medium"
-        .open=${this.open}
-        @closed=${this._closed}
-      >
-        ${this._renderMap()}
-        ${
-          here >= 0 || arrival.departed
-            ? html`<div class="note">
-                <ha-icon .icon=${modeIcon(arrival.route_type)}></ha-icon>
-                <span>
-                  ${here >= 0
-                    ? `${this._t("vehicleHere")}: ${this._stops[here].name}`
-                    : ""}
-                  ${arrival.departed
-                    ? `${here >= 0 ? " · " : ""}${this._t("departedAt")}${formatClock(arrival.departed, this.hass)}`
-                    : ""}
-                </span>
+    return this._renderDialog(
+      `${title}${arrival.destination ? ` · ${arrival.destination}` : ""}`,
+      [arrival.operator, this._t("routeStops")].filter(Boolean).join(" · "),
+      html`
+        <div style=${`--it-badge-color:${modeColor(arrival.route_type)};--it-mine:${MY_STOP_COLORS[0]}`}>
+          ${showMap
+            ? html`<israel-transit-map
+                .view=${picture.view}
+                .strings=${this._strings()}
+              ></israel-transit-map>`
+            : nothing}
+          ${stops.length ? this._renderStatus(arrival, stops, picture) : nothing}
+          ${showMap && picture.dashed && stops.length > 1
+            ? html`<div class="alert info approx" role="note">
+                ${icon(ICONS.map, { size: 18 })}<span>${this._t("approximateRoute")}</span>
               </div>`
-            : // Only worth saying when a position was expected: a timetabled row
-              // has no vehicle to locate in the first place.
-              this.showMap && arrival.is_realtime && !this._vehiclePoint
-              ? html`<div class="note">
-                  <ha-icon icon="mdi:map-marker-off-outline"></ha-icon>
-                  <span>${this._t("noVehicleLocation")}</span>
-                </div>`
-              : nothing
-        }
-        ${
-          state ??
-          html`<div class="list">
-            ${this._stops.map(
-              (stop, index) => html`
-                <div
-                  class="stop ${index === here ? "here" : ""} ${index === mine
-                    ? "mine"
-                    : ""}"
-                >
-                  <div class="track"><div class="node"></div></div>
-                  <div>
-                    <div class="stop-title">${stop.name}</div>
-                    <div class="stop-sub">
-                      ${[
-                        stop.city,
-                        stop.code,
-                        index === mine ? this._t("myStop") : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </div>
-                  </div>
-                  <div class="time">
-                    ${stop.arrival_time
-                      ? formatClock(stop.arrival_time, this.hass)
-                      : this._relative(stop.offset_seconds)}
-                  </div>
-                </div>
-              `,
-            )}
-          </div>`
-        }
-      </${this._dialog}>
-    `;
+            : nothing}
+          ${state ?? this._renderTimeline(stops, picture, showMap)}
+        </div>
+      `,
+    );
+  }
+
+  /** Where the vehicle is, and what that means for the rider. */
+  _renderStatus(arrival, stops, { here, mine, age, stale, vehicle }) {
+    let headline;
+    if (vehicle && here >= 0) {
+      headline = here === mine ? this._t("atYourStop") : this._t("nearStop", { stop: stops[here].name });
+    } else if (vehicle) {
+      headline = this._t("awayFromRoute");
+    } else if (arrival.is_realtime) {
+      headline = this._t("noVehicleLocation");
+    } else {
+      headline = this._t("scheduled");
+    }
+
+    const details = [];
+    if (vehicle && here >= 0 && mine > here) {
+      const left = mine - here;
+      details.push(left === 1 ? this._t("stopsToGoOne") : this._t("stopsToGo", { n: left }));
+    }
+    if (arrival.eta) {
+      details.push(this._t("arrivesAt", { time: formatClock(arrival.eta, this.hass) }));
+    }
+    if (!vehicle && arrival.departed) {
+      details.push(`${this._t("departedAt")}${formatClock(arrival.departed, this.hass)}`);
+    }
+
+    return html`<div class="status" role="status">
+      <div class="status-icon ${vehicle ? "" : "off"}">
+        ${icon(vehicle ? modePath(arrival.route_type) : ICONS.noPosition, { size: 22 })}
+      </div>
+      <div class="status-body">
+        <div class="status-title">${headline}</div>
+        ${details.length || stale
+          ? html`<div class="status-sub">
+              ${details.map((text) => html`<span>${text}</span>`)}
+              ${stale
+                ? html`<span class="stale"
+                    >${age < 60
+                      ? this._t("positionAgeSeconds")
+                      : this._t("positionAge", { n: Math.floor(age / 60) })}</span
+                  >`
+                : nothing}
+            </div>`
+          : nothing}
+      </div>
+    </div>`;
+  }
+
+  _renderTimeline(stops, { here, mine, passed }, showMap) {
+    return html`<ol class="timeline" aria-label=${this._t("routeStops")}>
+      ${stops.map((stop, index) => {
+        const isHere = index === here;
+        const isMine = index === mine;
+        const located = isPoint(stopPoint(stop));
+        const classes = [passed(index) && !isHere ? "done" : "", isHere ? "here" : "", isMine ? "mine" : ""].join(" ");
+        return html`<li class=${classes}>
+          <button
+            class="stop"
+            ?disabled=${!showMap || !located}
+            title=${showMap && located ? this._t("showOnMap") : ""}
+            @click=${() => this._focusStop(stop)}
+          >
+            <div class="track">
+              <div class="node">
+                ${isHere
+                  ? icon(modePath(this.arrival?.route_type), { size: 16, label: this._t("vehicleHere") })
+                  : isMine
+                    ? icon(ICONS.myStop, { size: 16 })
+                    : nothing}
+              </div>
+            </div>
+            <div>
+              <div class="stop-title">${stop.name}</div>
+              <div class="stop-sub">
+                ${isMine ? html`<span class="mine-label">${this._t("myStop")}</span> · ` : nothing}${[
+                  stop.city,
+                  stop.code,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
+            </div>
+            ${stop.arrival_time
+              ? html`<div class="time ltr">${formatClock(stop.arrival_time, this.hass)}</div>`
+              : html`<div class="time">${this._relative(stop.offset_seconds)}</div>`}
+          </button>
+        </li>`;
+      })}
+    </ol>`;
   }
 }
