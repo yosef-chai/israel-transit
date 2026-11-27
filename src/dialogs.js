@@ -13,7 +13,7 @@ import {
   splitLine,
   stopPoint,
   stopPositions,
-  vehicleSplit,
+  vehicleProgress,
 } from "./map-geometry.js";
 import { sharedStyles } from "./styles.js";
 import {
@@ -579,7 +579,7 @@ export class IsraelTransitRouteDialog extends DialogBase {
 
     // Where the vehicle is along the line, never moving backwards within one
     // run of one vehicle.
-    const measured = vehicleSplit(line, positions, here, vehicle);
+    const measured = vehicleProgress(line, positions, here, vehicle);
     const subject = `${arrival.line_ref}|${arrival.vehicle_ref ?? ""}`;
     const along = this._progress.update(subject, here, measured);
     const { done, ahead } =

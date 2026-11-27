@@ -23,6 +23,11 @@ const TICK_MS = 10000;
 // A vehicle stays on the board this long past its time, the same grace the
 // backend gives: "now" is often still pulling in. After that it has left.
 const DEPARTED_MS = 60000;
+// Heights in styles.js (cardStyles): the header with its city and code line,
+// one arrival row, and the padding under the list. Sizing follows them.
+const HEADER_PX = 72;
+const ROW_PX = 56;
+const ROWS_PAD_PX = 8;
 
 // Every visible part of a row can be switched off, and everything is on by
 // default except the two that add clutter more often than they add information.
@@ -124,14 +129,27 @@ export class IsraelTransitCard extends LitElement {
     this._refresh();
   }
 
-  getCardSize() {
-    return (this._config?.max_arrivals ?? DEFAULTS.max_arrivals) + 2;
+  /** The card's natural height in pixels, for `arrivals` rows. */
+  _contentHeight(arrivals) {
+    const header = this._config?.show_header === false ? 0 : HEADER_PX;
+    return header + arrivals * ROW_PX + ROWS_PAD_PX;
   }
 
+  getCardSize() {
+    // The masonry view counts in 50px units.
+    return Math.ceil(this._contentHeight(this._config?.max_arrivals ?? DEFAULTS.max_arrivals) / 50);
+  }
+
+  /**
+   * Sections view: grid rows are 56px with 8px between them, so n rows are
+   * 64n - 8 pixels. The default fits the configured arrivals (up to eight,
+   * after which the list scrolls inside the card, as the built-in list cards
+   * do); the minimum still fits the header and one arrival.
+   */
   getGridOptions() {
-    const rows = Math.min(this._config?.max_arrivals ?? DEFAULTS.max_arrivals, 8);
-    const header = this._config?.show_header === false ? 1 : 2;
-    return { rows: rows + header, columns: 12, min_rows: 3, min_columns: 6 };
+    const arrivals = Math.min(this._config?.max_arrivals ?? DEFAULTS.max_arrivals, 8);
+    const rowsFor = (n) => Math.ceil((this._contentHeight(n) + 8) / 64);
+    return { columns: 12, rows: rowsFor(arrivals), min_columns: 6, min_rows: rowsFor(1) };
   }
 
   connectedCallback() {

@@ -178,6 +178,13 @@ export const sharedStyles = css`
 `;
 
 export const cardStyles = css`
+  /* The sections view gives the card a fixed height when it is resized;
+     filling it lets the list scroll inside rather than spill out. In the
+     masonry view the height stays the content's. */
+  :host {
+    height: 100%;
+  }
+
   ha-card {
     display: flex;
     flex-direction: column;
@@ -187,6 +194,7 @@ export const cardStyles = css`
   }
 
   .header {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: var(--ha-space-3, 12px);
@@ -244,6 +252,7 @@ export const cardStyles = css`
   }
 
   .notice {
+    flex: 0 0 auto;
     padding: 0 var(--ha-space-4, 16px) var(--ha-space-2, 8px);
   }
 
@@ -251,6 +260,9 @@ export const cardStyles = css`
     display: flex;
     flex-direction: column;
     flex: 1 1 auto;
+    /* Lets the list shrink to the height the grid gives the card, and
+       scroll inside it, instead of being clipped. */
+    min-height: 0;
     overflow-y: auto;
     padding-block-end: var(--ha-space-2, 8px);
   }
@@ -399,6 +411,37 @@ export const cardStyles = css`
     }
     .eta-value {
       font-size: var(--ha-font-size-l, 16px);
+    }
+    .stop-name {
+      font-size: var(--ha-font-size-l, 16px);
+    }
+  }
+
+  /* Six columns of a phone-width section: the line, where it goes, when. */
+  @container (max-width: 220px) {
+    .header,
+    .row {
+      padding-inline: var(--ha-space-2, 8px);
+    }
+    .sub {
+      display: none;
+    }
+    /* One line for the name and one for the code, so the header keeps the
+       height the grid was sized for. */
+    .stop-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .stop-meta span:not(.code) {
+      display: none;
+    }
+    .badge {
+      min-width: 36px;
+      padding-inline: var(--ha-space-1, 4px);
+    }
+    .eta {
+      min-width: 0;
     }
   }
 `;

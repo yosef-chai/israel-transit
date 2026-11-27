@@ -15,6 +15,7 @@ import {
   splitLine,
   stopPositions,
   toLngLat,
+  vehicleProgress,
   vehicleSplit,
 } from "../../src/map-geometry.js";
 
@@ -48,6 +49,18 @@ test("a vehicle far off the line leaves it whole", () => {
   const line = measureLine(north(10));
   // About 470 m east of the line.
   assert.equal(vehicleSplit(line, [], -1, [32.005, 34.785]), null);
+});
+
+test("a vehicle off the line but near a stop has got as far as that stop", () => {
+  const line = measureLine(north(10));
+  const stops = [stop(32, 34.78), stop(32.005, 34.78), stop(32.01, 34.78)];
+  const positions = stopPositions(line, stops);
+  // About 470 m east of the second stop: a detour, not on the drawn line.
+  const detour = [32.005, 34.785];
+  assert.equal(vehicleSplit(line, positions, 1, detour), null);
+  assert.ok(Math.abs(vehicleProgress(line, positions, 1, detour) - positions[1]) < 1);
+  // Nowhere near any stop: unknown.
+  assert.equal(vehicleProgress(line, positions, -1, [31, 34]), null);
 });
 
 test("a line that returns along its own street is split on the right leg", () => {

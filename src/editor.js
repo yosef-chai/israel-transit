@@ -4,7 +4,7 @@ import { DEFAULTS } from "./card.js";
 import { ICONS, icon } from "./icons.js";
 import { localize } from "./localize.js";
 import { sharedStyles } from "./styles.js";
-import { BRAND_ICON, DOMAIN, fireEvent, modeColor } from "./util.js";
+import { DOMAIN, fireEvent, modeColor } from "./util.js";
 
 const SEARCH_DEBOUNCE_MS = 300;
 
@@ -25,6 +25,21 @@ const compact = (config) =>
         DEFAULTS[key] !== value,
     ),
   );
+
+const TOGGLES = [
+  ["show_header", "editorShowHeader"],
+  ["show_city", "editorShowCity"],
+  ["show_stop_code", "editorShowStopCode"],
+  ["show_destination", "editorShowDestination"],
+  ["show_operator", "editorShowOperator"],
+  ["show_mode_icon", "editorShowModeIcon"],
+  ["show_realtime_tag", "editorShowRealtimeTag"],
+  ["show_platform", "editorShowPlatform"],
+  ["show_delay", "editorShowDelay"],
+  ["show_clock", "editorShowClock"],
+];
+
+const stopSub = (stop) => [stop.street, stop.city, stop.code].filter(Boolean).join(" · ");
 
 export class IsraelTransitCardEditor extends LitElement {
   static properties = {
@@ -47,252 +62,266 @@ export class IsraelTransitCardEditor extends LitElement {
     this._picking = false;
   }
 
-  // Every control here is a native one: <input>, <select>, a checkbox with
-  // role="switch". Home Assistant's form elements (ha-form, ha-textfield) are
-  // not a promised API for custom cards and are registered lazily; when they
-  // had not been, they rendered as nothing and the stop could not be changed.
-  // A native control cannot fail that way, and the tokens below give it the
-  // look of the built-in editors.
+  // A custom editor, because finding a stop is a WebSocket search that a
+  // getConfigForm() schema cannot hold. Home Assistant's own form elements
+  // (ha-form, ha-input) are not a promised API for custom cards and are
+  // registered lazily, so the controls are native ones drawn the way the
+  // frontend draws its form today: a filled 56px field with a floating label
+  // and a bottom line, ha-form's checkboxes, an outlined expansion panel, and
+  // ha-form's 24px between fields. Every value is a theme token with a
+  // fallback for releases that do not set it.
   static styles = [
     sharedStyles,
     css`
+      :host {
+        --it-field-bg: var(--ha-color-form-background, rgba(127, 127, 127, 0.08));
+        --it-field-bg-hover: var(--ha-color-form-background-hover, rgba(127, 127, 127, 0.14));
+        --it-line: var(--ha-color-border-neutral-loud, rgba(127, 127, 127, 0.6));
+        --it-outline: var(--outline-color, var(--divider-color, rgba(127, 127, 127, 0.3)));
+        --it-hover: var(--ha-color-fill-neutral-quiet-hover, rgba(127, 127, 127, 0.08));
+        --it-duration: var(--ha-animation-duration-fast, 150ms);
+      }
+
       .box {
         display: flex;
         flex-direction: column;
-        gap: var(--ha-space-4, 16px);
+        gap: var(--ha-space-6, 24px);
       }
 
       .grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: var(--ha-space-4, 16px);
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: var(--ha-space-6, 24px) var(--ha-space-2, 8px);
       }
 
-      .field select,
-      .field input[type="text"],
-      .field input[type="number"] {
-        width: 100%;
+      /* -- the filled text field (ha-input, appearance "material") -- */
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+
+      .control {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: var(--ha-space-2, 8px);
         box-sizing: border-box;
-        min-height: 48px;
-        padding: var(--ha-space-3, 12px) var(--ha-space-4, 16px);
-        border: var(--ha-border-width-sm, 1px) solid var(--ha-color-border-neutral-normal, rgba(127, 127, 127, 0.4));
-        border-radius: var(--ha-border-radius-md, 8px);
-        background: var(--ha-color-surface-default, var(--card-background-color));
+        width: 100%;
+        min-height: 56px;
+        margin: 0;
+        padding: 0 var(--ha-space-4, 16px);
+        border: none;
+        border-radius: var(--ha-border-radius-sm, 4px) var(--ha-border-radius-sm, 4px) 0 0;
+        background: var(--it-field-bg);
         color: var(--primary-text-color);
+        font: inherit;
+        text-align: start;
+        transition: background-color var(--it-duration) ease-in-out;
+      }
+
+      .control:hover {
+        background: var(--it-field-bg-hover);
+      }
+
+      .control::after {
+        content: "";
+        position: absolute;
+        inset-inline: 0;
+        bottom: 0;
+        height: 1px;
+        background: var(--it-line);
+        pointer-events: none;
+        transition:
+          height var(--it-duration) ease-in-out,
+          background-color var(--it-duration) ease-in-out;
+      }
+
+      .control:focus-within::after {
+        height: 2px;
+        background: var(--primary-color);
+      }
+
+      .control > label {
+        position: absolute;
+        top: 20px;
+        inset-inline: var(--ha-space-4, 16px);
+        overflow: hidden;
+        color: var(--secondary-text-color);
+        font-size: var(--ha-font-size-m, 14px);
+        line-height: var(--ha-line-height-condensed, 1.2);
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        pointer-events: none;
+        transition: all var(--it-duration) ease-in-out;
+      }
+
+      .control.start > label {
+        inset-inline-start: 48px;
+      }
+
+      .control:focus-within > label {
+        color: var(--primary-color);
+      }
+
+      /* Raised once there is a value, as ha-input does; a select and a
+         number always have one. */
+      .control:focus-within > label,
+      .control.raised > label,
+      .control:has(input:not(:placeholder-shown)) > label {
+        top: var(--ha-space-2, 8px);
+        font-size: var(--ha-font-size-s, 12px);
+      }
+
+      .control input,
+      .control select {
+        flex: 1 1 auto;
+        align-self: stretch;
+        min-width: 0;
+        margin: 0;
+        padding: var(--ha-space-5, 20px) 0 var(--ha-space-1, 4px);
+        border: none;
+        outline: none;
+        background: none;
+        color: inherit;
         font: inherit;
         font-size: var(--ha-font-size-l, 16px);
       }
 
-      .field select:focus-visible,
-      .field input:focus-visible {
-        outline: 2px solid var(--ha-color-focus, var(--primary-color));
-        outline-offset: 2px;
-      }
-
-      .switch-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: var(--ha-space-4, 16px);
-        min-height: 48px;
-        cursor: pointer;
-      }
-
-      .switch-text {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        font-size: var(--ha-font-size-m, 14px);
-        color: var(--primary-text-color);
-      }
-
-      /* A switch built on a checkbox, in Home Assistant's proportions. */
-      .switch {
+      .control select {
         appearance: none;
-        flex: 0 0 auto;
-        position: relative;
-        width: 36px;
-        height: 20px;
-        margin: 0;
-        border-radius: var(--ha-border-radius-pill, 9999px);
-        background: var(--ha-color-fill-neutral-loud-resting, rgba(127, 127, 127, 0.55));
+        padding-inline-end: 32px;
         cursor: pointer;
-        transition: background-color var(--ha-animation-duration-fast, 150ms);
       }
 
-      .switch::after {
-        content: "";
-        position: absolute;
-        inset-block-start: 2px;
-        inset-inline-start: 2px;
-        width: 16px;
-        height: 16px;
-        border-radius: 50%;
-        background: #fff;
-        transition: inset-inline-start var(--ha-animation-duration-fast, 150ms);
-      }
-
-      .switch:checked {
-        background: var(--primary-color);
-      }
-
-      .switch:checked::after {
-        inset-inline-start: 18px;
-      }
-
-      .switch:focus-visible {
-        outline: 2px solid var(--ha-color-focus, var(--primary-color));
-        outline-offset: 2px;
-      }
-
-      @media (prefers-reduced-motion: reduce) {
-        .switch,
-        .switch::after {
-          transition: none;
-        }
-      }
-
-      .expandable {
-        border: var(--ha-border-width-sm, 1px) solid var(--divider-color, rgba(127, 127, 127, 0.3));
-        border-radius: var(--ha-border-radius-lg, 12px);
-      }
-
-      .expandable summary {
-        display: flex;
-        align-items: center;
-        gap: var(--ha-space-2, 8px);
-        min-height: 48px;
-        padding-inline: var(--ha-space-3, 12px);
-        list-style: none;
-        cursor: pointer;
-        font-size: var(--ha-font-size-m, 14px);
-        font-weight: var(--ha-font-weight-medium, 500);
+      .control option {
+        background: var(--card-background-color, #fff);
         color: var(--primary-text-color);
       }
 
-      .expandable summary::-webkit-details-marker {
+      .control input::-webkit-search-cancel-button {
         display: none;
       }
 
-      .expandable summary:focus-visible {
-        outline: 2px solid var(--ha-color-focus, var(--primary-color));
-        outline-offset: -2px;
-        border-radius: var(--ha-border-radius-lg, 12px);
-      }
-
-      .summary-chevron {
+      .control .end {
+        position: absolute;
+        inset-inline-end: var(--ha-space-3, 12px);
         color: var(--secondary-text-color);
-        transition: transform var(--ha-animation-duration-fast, 150ms);
+        pointer-events: none;
       }
 
-      :host(:dir(rtl)) .summary-chevron {
-        transform: scaleX(-1);
+      .control > .icon {
+        color: var(--secondary-text-color);
       }
 
-      .expandable[open] .summary-chevron {
-        transform: rotate(90deg);
-      }
-
-      .switches {
-        display: flex;
-        flex-direction: column;
-        padding: 0 var(--ha-space-4, 16px) var(--ha-space-2, 8px);
-      }
-
-      .brand {
+      .hint {
         display: flex;
         align-items: center;
-        gap: 10px;
-        margin-block-end: -4px;
+        min-height: var(--ha-space-5, 20px);
+        margin-inline-start: var(--ha-space-4, 16px);
+        color: var(--ha-color-text-secondary, var(--secondary-text-color));
+        font-size: var(--ha-font-size-s, 12px);
       }
 
-      .brand img {
-        width: 28px;
-        height: 28px;
-        flex: 0 0 auto;
+      .hint.alone {
+        margin-inline-start: 0;
       }
 
-      .brand-name {
-        font-size: 0.9375rem;
-        font-weight: 500;
-        color: var(--primary-text-color);
+      /* -- the stop, picked (ha-picker-field) and being searched for -- */
+
+      button.control {
+        cursor: pointer;
       }
 
-      .selected {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px;
-        border-radius: 10px;
-        background: var(--ha-color-surface-low, rgba(127, 127, 127, 0.12));
-      }
-
-      .selected-body {
-        flex: 1 1 auto;
-        min-width: 0;
-      }
-
-      .selected-name {
-        color: var(--primary-text-color);
-        overflow-wrap: anywhere;
-      }
-
-      .selected-sub {
-        font-size: 0.75rem;
-        color: var(--secondary-text-color);
-      }
-
-      /* The stop search; see the note above this stylesheet. */
-      .field {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-      }
-
-      .field label {
-        font-size: 0.75rem;
-        color: var(--secondary-text-color);
-      }
-
-      .field input {
-        width: 100%;
-        box-sizing: border-box;
-        padding: 12px 14px;
-        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.4));
-        border-radius: 10px;
-        background: var(--ha-color-surface-low, rgba(127, 127, 127, 0.1));
-        color: var(--primary-text-color);
-        font: inherit;
-        font-size: 1rem;
-      }
-
-      .field input:focus {
+      button.control:focus-visible {
         outline: none;
-        border-color: var(--primary-color);
       }
 
-      .row {
+      .two-line {
         display: flex;
+        flex: 1 1 auto;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+        padding-block: var(--ha-space-2, 8px);
+      }
+
+      .primary {
+        overflow-wrap: anywhere;
+        color: var(--primary-text-color);
+        font-size: var(--ha-font-size-m, 14px);
+        line-height: var(--ha-line-height-condensed, 1.2);
+      }
+
+      .secondary {
+        overflow: hidden;
+        color: var(--secondary-text-color);
+        font-size: var(--ha-font-size-s, 12px);
+        line-height: var(--ha-line-height-condensed, 1.2);
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+
+      .icon-button {
+        display: inline-flex;
+        flex: 0 0 auto;
         align-items: center;
-        justify-content: space-between;
-        gap: 8px;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        margin: 0;
+        padding: 0;
+        border: none;
+        border-radius: var(--ha-border-radius-circle, 50%);
+        background: none;
+        color: var(--secondary-text-color);
+        cursor: pointer;
+      }
+
+      .icon-button:hover:not(:disabled) {
+        background: var(--it-hover);
+        color: var(--primary-text-color);
+      }
+
+      .icon-button:focus-visible,
+      .chip:focus-visible,
+      .check input:focus-visible {
+        outline: 2px solid var(--ha-color-focus, var(--primary-color));
+        outline-offset: 2px;
+      }
+
+      .icon-button:disabled {
+        opacity: 0.3;
+        cursor: default;
+      }
+
+      .control .icon-button {
+        margin-inline-end: calc(-1 * var(--ha-space-2, 8px));
       }
 
       .results {
         display: flex;
         flex-direction: column;
-        max-height: 260px;
+        max-height: 280px;
+        margin-block-start: var(--ha-space-2, 8px);
         overflow-y: auto;
-        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.3));
-        border-radius: 10px;
+        overscroll-behavior: contain;
+        border: 1px solid var(--it-outline);
+        border-radius: var(--ha-border-radius-md, 8px);
       }
 
       .result {
-        display: block;
+        display: flex;
+        flex: 0 0 auto;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        box-sizing: border-box;
         width: 100%;
-        padding: 10px 12px;
+        min-height: 56px;
+        padding: var(--ha-space-2, 8px) var(--ha-space-4, 16px);
         border: none;
-        border-top: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
         background: none;
         color: inherit;
         font: inherit;
@@ -300,27 +329,119 @@ export class IsraelTransitCardEditor extends LitElement {
         cursor: pointer;
       }
 
-      .result:first-child {
-        border-top: none;
+      .result + .result {
+        border-top: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
       }
 
-      .result:hover,
+      .result:hover {
+        background: var(--it-hover);
+      }
+
       .result:focus-visible {
-        background: var(--ha-color-surface-lower, rgba(127, 127, 127, 0.1));
+        outline: 2px solid var(--ha-color-focus, var(--primary-color));
+        outline-offset: -2px;
       }
 
-      .result-name {
+      .status {
+        padding: var(--ha-space-2, 8px) var(--ha-space-4, 16px) 0;
+        color: var(--secondary-text-color);
+        font-size: var(--ha-font-size-s, 12px);
+      }
+
+      /* -- checkboxes (ha-form-boolean) -- */
+
+      .check {
+        display: flex;
+        align-items: center;
+        gap: var(--ha-space-2, 8px);
+        min-height: 56px;
+        cursor: pointer;
+      }
+
+      .check input {
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+        margin: 11px;
+        accent-color: var(--primary-color);
+        cursor: pointer;
+      }
+
+      .check-text {
+        display: flex;
+        flex-direction: column;
         color: var(--primary-text-color);
+        font-size: var(--ha-font-size-m, 14px);
       }
 
-      .result-sub {
-        font-size: 0.75rem;
-        color: var(--secondary-text-color);
+      .check-text .hint {
+        min-height: 0;
+        margin: 0;
       }
 
-      .hint {
-        font-size: 0.75rem;
+      .checks {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        column-gap: var(--ha-space-2, 8px);
+      }
+
+      /* -- the expansion panel (ha-expansion-panel, outlined) -- */
+
+      .panel {
+        border: 1px solid var(--it-outline);
+        border-radius: var(--ha-border-radius-md, 8px);
+      }
+
+      .panel summary {
+        display: flex;
+        align-items: center;
+        min-height: 48px;
+        padding-inline: var(--ha-space-3, 12px) var(--ha-space-2, 8px);
+        border-radius: var(--ha-border-radius-md, 8px);
+        color: var(--primary-text-color);
+        font-weight: var(--ha-font-weight-medium, 500);
+        list-style: none;
+        cursor: pointer;
+      }
+
+      .panel summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .panel summary:focus-visible {
+        outline: none;
+        background: var(--ha-color-fill-neutral-normal-active, var(--it-hover));
+      }
+
+      .panel summary > span {
+        flex: 1 1 auto;
+      }
+
+      .panel summary .icon {
         color: var(--secondary-text-color);
+        transition: transform var(--it-duration) cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .panel[open] summary .icon {
+        transform: rotate(180deg);
+      }
+
+      .panel[open] summary {
+        border-end-start-radius: 0;
+        border-end-end-radius: 0;
+      }
+
+      .panel-content {
+        padding: 0 var(--ha-space-3, 12px) var(--ha-space-2, 8px);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .control,
+        .control::after,
+        .control > label,
+        .panel summary .icon {
+          transition: none;
+        }
       }
 
       /* -- the ordered line list -- */
@@ -328,27 +449,33 @@ export class IsraelTransitCardEditor extends LitElement {
       .section {
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: var(--ha-space-2, 8px);
       }
 
       .section-title {
-        font-size: 0.875rem;
-        font-weight: 500;
+        margin: 0;
         color: var(--primary-text-color);
+        font-size: var(--ha-font-size-m, 14px);
+        font-weight: var(--ha-font-weight-medium, 500);
+      }
+
+      .lines {
+        display: flex;
+        flex-direction: column;
+        margin: 0;
+        padding: 0;
+        list-style: none;
       }
 
       .line {
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 6px 8px;
-        border-radius: 10px;
-        background: var(--ha-color-surface-low, rgba(127, 127, 127, 0.12));
+        gap: var(--ha-space-3, 12px);
+        min-height: 48px;
       }
 
       .line .badge {
-        min-width: 38px;
-        font-size: 0.875rem;
+        min-width: 40px;
       }
 
       .line-body {
@@ -356,74 +483,41 @@ export class IsraelTransitCardEditor extends LitElement {
         min-width: 0;
       }
 
-      .line-sub {
-        font-size: 0.75rem;
-        color: var(--secondary-text-color);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
       .tools {
         display: flex;
         flex: 0 0 auto;
-        gap: 2px;
-      }
-
-      .tool {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 40px;
-        height: 40px;
-        padding: 0;
-        border: none;
-        border-radius: 50%;
-        background: none;
-        color: var(--secondary-text-color);
-        cursor: pointer;
-      }
-
-      .tool:hover:not(:disabled) {
-        background: var(--ha-color-surface-lower, rgba(127, 127, 127, 0.14));
-        color: var(--primary-text-color);
-      }
-
-      .tool:disabled {
-        opacity: 0.35;
-        cursor: default;
       }
 
       .chips {
         display: flex;
         flex-wrap: wrap;
-        gap: 6px;
+        gap: var(--ha-space-2, 8px);
       }
 
+      /* ha-assist-chip: 32px high, a pill, outlined. */
       .chip {
         display: inline-flex;
         align-items: center;
-        gap: 4px;
-        padding: 5px 10px;
-        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.35));
-        border-radius: 16px;
+        gap: var(--ha-space-1, 4px);
+        box-sizing: border-box;
+        height: 32px;
+        padding-inline: var(--ha-space-2, 8px) var(--ha-space-4, 16px);
+        border: 1px solid var(--ha-color-border-neutral-quiet, var(--it-outline));
+        border-radius: var(--ha-border-radius-pill, 9999px);
         background: none;
         color: var(--primary-text-color);
         font: inherit;
-        font-size: 0.8125rem;
+        font-size: var(--ha-font-size-m, 14px);
+        font-weight: var(--ha-font-weight-medium, 500);
         cursor: pointer;
       }
 
-      .chip:hover,
-      .chip:focus-visible {
-        background: var(--ha-color-surface-lower, rgba(127, 127, 127, 0.12));
+      .chip:hover {
+        background: var(--it-hover);
       }
 
-      .chip .swatch {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--it-badge-color, var(--it-mode-unknown));
+      .chip .icon {
+        color: var(--it-badge-color, var(--it-mode-unknown));
       }
 
       .line-name {
@@ -531,6 +625,12 @@ export class IsraelTransitCardEditor extends LitElement {
     this._loadRoutes(stop.code);
   }
 
+  async _startPicking() {
+    this._picking = true;
+    await this.updateComplete;
+    this.shadowRoot.querySelector("#it-search")?.focus();
+  }
+
   /** Leave the stop picker, forgetting what was typed into it. */
   _close() {
     this._results = [];
@@ -609,70 +709,86 @@ export class IsraelTransitCardEditor extends LitElement {
     return { ...DEFAULTS, ...this._config };
   }
 
+  _hint(text, id) {
+    return text ? html`<span class="hint" id=${id}>${text}</span>` : nothing;
+  }
+
   _renderText(name, label, helper) {
     const id = `it-${name}`;
     return html`<div class="field">
-      <label for=${id}>${label}</label>
-      <input
-        id=${id}
-        type="text"
-        .value=${this._config[name] ?? ""}
-        @change=${(ev) => this._set(name, ev.target.value.trim())}
-      />
-      ${helper ? html`<span class="hint">${helper}</span>` : nothing}
+      <div class="control">
+        <label for=${id}>${label}</label>
+        <input
+          id=${id}
+          type="text"
+          placeholder=" "
+          aria-describedby=${helper ? `${id}-hint` : nothing}
+          .value=${this._config[name] ?? ""}
+          @change=${(ev) => this._set(name, ev.target.value.trim())}
+        />
+      </div>
+      ${this._hint(helper, `${id}-hint`)}
     </div>`;
   }
 
   _renderNumber(name, label, min, max, helper) {
     const id = `it-${name}`;
     return html`<div class="field">
-      <label for=${id}>${label}</label>
-      <input
-        id=${id}
-        type="number"
-        inputmode="numeric"
-        min=${min}
-        max=${max}
-        step="1"
-        .value=${String(this._value[name])}
-        @change=${(ev) => this._setNumber(name, ev.target.value, min, max)}
-      />
-      ${helper ? html`<span class="hint">${helper}</span>` : nothing}
+      <div class="control raised">
+        <label for=${id}>${label}</label>
+        <input
+          id=${id}
+          type="number"
+          inputmode="numeric"
+          min=${min}
+          max=${max}
+          step="1"
+          aria-describedby=${helper ? `${id}-hint` : nothing}
+          .value=${String(this._value[name])}
+          @change=${(ev) => this._setNumber(name, ev.target.value, min, max)}
+        />
+      </div>
+      ${this._hint(helper, `${id}-hint`)}
     </div>`;
   }
 
-  _renderSwitch(name, label, helper) {
+  _renderSelect(name, label, options) {
     const id = `it-${name}`;
-    return html`<label class="switch-row" for=${id}>
-      <span class="switch-text">
-        <span>${label}</span>
-        ${helper ? html`<span class="hint">${helper}</span>` : nothing}
-      </span>
+    return html`<div class="field">
+      <div class="control raised">
+        <label for=${id}>${label}</label>
+        <select id=${id} @change=${(ev) => this._set(name, ev.target.value)}>
+          ${options.map(
+            ([value, text]) =>
+              html`<option value=${value} ?selected=${this._value[name] === value}>
+                ${text}
+              </option>`,
+          )}
+        </select>
+        ${icon(ICONS.menuDown, { size: 24, cls: "icon end" })}
+      </div>
+    </div>`;
+  }
+
+  _renderCheck(name, label, helper) {
+    const id = `it-${name}`;
+    return html`<label class="check" for=${id}>
       <input
         id=${id}
-        class="switch"
         type="checkbox"
-        role="switch"
+        aria-describedby=${helper ? `${id}-hint` : nothing}
         .checked=${Boolean(this._value[name])}
         @change=${(ev) => this._set(name, ev.target.checked)}
       />
+      <span class="check-text">
+        <span>${label}</span>
+        ${this._hint(helper, `${id}-hint`)}
+      </span>
     </label>`;
   }
 
   _renderOptions() {
     const hasRail = this._routes.some((route) => String(route.route_type) === "2");
-    const toggles = [
-      ["show_header", "editorShowHeader"],
-      ["show_city", "editorShowCity"],
-      ["show_stop_code", "editorShowStopCode"],
-      ["show_destination", "editorShowDestination"],
-      ["show_operator", "editorShowOperator"],
-      ["show_mode_icon", "editorShowModeIcon"],
-      ["show_realtime_tag", "editorShowRealtimeTag"],
-      ["show_platform", "editorShowPlatform"],
-      ["show_delay", "editorShowDelay"],
-      ["show_clock", "editorShowClock"],
-    ];
     return html`
       ${this._renderText("title", this._t("editorTitle"))}
       <div class="grid">
@@ -680,29 +796,22 @@ export class IsraelTransitCardEditor extends LitElement {
         ${this._renderNumber("max_lines", this._t("editorMaxLines"), 0, 20, this._t("editorMaxLinesHelp"))}
       </div>
       ${this._lines.length
-        ? html`<div class="field">
-            <label for="it-order">${this._t("editorOrder")}</label>
-            <select id="it-order" @change=${(ev) => this._set("order", ev.target.value)}>
-              <option value="time" ?selected=${this._value.order !== "lines"}>
-                ${this._t("editorOrderTime")}
-              </option>
-              <option value="lines" ?selected=${this._value.order === "lines"}>
-                ${this._t("editorOrderLines")}
-              </option>
-            </select>
-          </div>`
+        ? this._renderSelect("order", this._t("editorOrder"), [
+            ["time", this._t("editorOrderTime")],
+            ["lines", this._t("editorOrderLines")],
+          ])
         : nothing}
-      ${this._renderSwitch("show_map", this._t("editorShowMap"), this._t("editorShowMapHelp"))}
-      <details class="expandable">
+      ${hasRail ? this._renderText("rail_destination", this._t("mode_2")) : nothing}
+      ${this._renderCheck("show_map", this._t("editorShowMap"), this._t("editorShowMapHelp"))}
+      <details class="panel">
         <summary>
-          ${icon(ICONS.chevron, { size: 20, cls: "icon summary-chevron" })}
           <span>${this._t("editorDisplay")}</span>
+          ${icon(ICONS.expand, { size: 24, cls: "icon" })}
         </summary>
-        <div class="switches">
-          ${toggles.map(([name, key]) => this._renderSwitch(name, this._t(key)))}
+        <div class="panel-content checks">
+          ${TOGGLES.map(([name, key]) => this._renderCheck(name, this._t(key)))}
         </div>
       </details>
-      ${hasRail ? this._renderText("rail_destination", this._t("mode_2")) : nothing}
     `;
   }
 
@@ -714,46 +823,53 @@ export class IsraelTransitCardEditor extends LitElement {
 
     return html`
       <div class="box">
-        <div class="brand">
-          <img src=${BRAND_ICON} alt="" aria-hidden="true" />
-          <span class="brand-name">${this._t("name")}</span>
-        </div>
         ${needsPicker ? this._renderSearch() : this._renderSelected()}
         ${this._config.stop_code
-          ? html`
-              ${this._renderLines()} ${this._renderOptions()}
-            `
+          ? html`${this._renderLines()} ${this._renderOptions()}`
           : nothing}
       </div>
     `;
   }
 
+  /** The chosen stop, drawn like Home Assistant's picker field. */
   _renderSelected() {
     const stop = this._stop || { code: this._config.stop_code };
-    return html`
-      <div class="selected">
+    const name = stop.name || this._t("stop");
+    return html`<div class="field">
+      <button
+        class="control picker"
+        aria-label=${`${this._t("editorStop")}: ${name}. ${this._t("editorChange")}`}
+        @click=${this._startPicking}
+      >
         ${icon(ICONS.busStop, { size: 24 })}
-        <div class="selected-body">
-          <div class="selected-name">${stop.name || this._t("stop")}</div>
-          <div class="selected-sub">
-            ${[stop.street, stop.city, stop.code].filter(Boolean).join(" · ")}
-          </div>
-        </div>
-        <button class="chip" @click=${() => (this._picking = true)}>
-          ${this._t("editorChange")}
-        </button>
-      </div>
-    `;
+        <span class="two-line">
+          <span class="primary">${name}</span>
+          <span class="secondary">${stopSub(stop)}</span>
+        </span>
+        ${icon(ICONS.menuDown, { size: 24 })}
+      </button>
+    </div>`;
   }
 
   _renderSearch() {
     return html`
       <div class="field">
-        <div class="row">
+        <div class="control start">
+          ${icon(ICONS.search, { size: 24 })}
           <label for="it-search">${this._t("editorSearch")}</label>
+          <input
+            id="it-search"
+            type="search"
+            autocomplete="off"
+            placeholder=" "
+            aria-describedby="it-search-hint"
+            .value=${this._query ?? ""}
+            @input=${this._onSearchInput}
+            @keydown=${(ev) => ev.key === "Escape" && this._config.stop_code && this._close()}
+          />
           ${this._config.stop_code
             ? html`<button
-                class="tool"
+                class="icon-button"
                 title=${this._t("editorCancel")}
                 aria-label=${this._t("editorCancel")}
                 @click=${this._close}
@@ -762,35 +878,27 @@ export class IsraelTransitCardEditor extends LitElement {
               </button>`
             : nothing}
         </div>
-        <input
-          id="it-search"
-          type="search"
-          autocomplete="off"
-          .value=${this._query ?? ""}
-          @input=${this._onSearchInput}
-        />
-        <span class="hint">${this._t("editorSearchHelp")}</span>
-      </div>
-      ${this._searching
-        ? html`<div class="hint">${this._t("editorSearching")}</div>`
-        : this._results.length
+        ${this._hint(this._t("editorSearchHelp"), "it-search-hint")}
+        <div role="status" aria-live="polite">
+          ${this._searching
+            ? html`<div class="status">${this._t("editorSearching")}</div>`
+            : this._searched && !this._results.length
+              ? html`<div class="status">${this._t("editorNoResults")}</div>`
+              : nothing}
+        </div>
+        ${!this._searching && this._results.length
           ? html`<div class="results">
               ${this._results.map(
                 (stop) => html`
                   <button class="result" @click=${() => this._pick(stop)}>
-                    <div class="result-name">${stop.name}</div>
-                    <div class="result-sub">
-                      ${[stop.street, stop.city, stop.code]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </div>
+                    <span class="primary">${stop.name}</span>
+                    <span class="secondary">${stopSub(stop)}</span>
                   </button>
                 `,
               )}
             </div>`
-          : this._searched
-            ? html`<div class="hint">${this._t("editorNoResults")}</div>`
-            : nothing}
+          : nothing}
+      </div>
     `;
   }
 
@@ -800,19 +908,21 @@ export class IsraelTransitCardEditor extends LitElement {
     const rest = [...byLine.keys()].filter((name) => !chosen.includes(name));
 
     return html`
-      <div class="section">
-        <div class="section-title">${this._t("editorLines")}</div>
+      <div class="section" role="group" aria-labelledby="it-lines-title">
+        <h3 class="section-title" id="it-lines-title">${this._t("editorLines")}</h3>
         ${chosen.length
-          ? chosen.map((name, index) =>
-              this._renderChosenLine(name, index, chosen.length, byLine.get(name)),
-            )
-          : html`<div class="hint">${this._t("editorLinesHelp")}</div>`}
+          ? html`<ul class="lines">
+              ${chosen.map((name, index) =>
+                this._renderChosenLine(name, index, chosen.length, byLine.get(name)),
+              )}
+            </ul>`
+          : html`<span class="hint alone">${this._t("editorLinesHelp")}</span>`}
         ${rest.length
           ? html`<div class="chips">
               ${rest.map((name) => this._renderAddChip(name, byLine.get(name)))}
             </div>`
           : byLine.size
-            ? html`<div class="hint">${this._t("editorAllShown")}</div>`
+            ? html`<span class="hint alone">${this._t("editorAllShown")}</span>`
             : nothing}
       </div>
     `;
@@ -826,48 +936,44 @@ export class IsraelTransitCardEditor extends LitElement {
    * card cannot rely on being loaded.
    */
   _renderChosenLine(name, index, total, route) {
+    const sub = [route?.destination, route?.operator].filter(Boolean).join(" · ");
     return html`
-      <div class="line">
-        <div
-          class="badge"
-          style=${`--it-badge-color:${modeColor(route?.route_type)}`}
-        >
+      <li class="line">
+        <div class="badge" style=${`--it-badge-color:${modeColor(route?.route_type)}`}>
           ${name}
         </div>
         <div class="line-body">
-          <div class="line-sub">
-            ${[route?.destination, route?.operator].filter(Boolean).join(" · ")}
-          </div>
+          <div class="secondary">${sub}</div>
         </div>
         <div class="tools">
           <button
-            class="tool"
+            class="icon-button"
             ?disabled=${index === 0}
             title=${this._t("editorMoveUp")}
-            aria-label=${this._t("editorMoveUp")}
+            aria-label=${`${this._t("editorMoveUp")}: ${name}`}
             @click=${() => this._move(index, -1)}
           >
             ${icon(ICONS.arrowUp)}
           </button>
           <button
-            class="tool"
+            class="icon-button"
             ?disabled=${index === total - 1}
             title=${this._t("editorMoveDown")}
-            aria-label=${this._t("editorMoveDown")}
+            aria-label=${`${this._t("editorMoveDown")}: ${name}`}
             @click=${() => this._move(index, 1)}
           >
             ${icon(ICONS.arrowDown)}
           </button>
           <button
-            class="tool"
+            class="icon-button"
             title=${this._t("editorRemove")}
-            aria-label=${this._t("editorRemove")}
+            aria-label=${`${this._t("editorRemove")}: ${name}`}
             @click=${() => this._removeLine(index)}
           >
             ${icon(ICONS.close)}
           </button>
         </div>
-      </div>
+      </li>
     `;
   }
 
@@ -876,10 +982,11 @@ export class IsraelTransitCardEditor extends LitElement {
       <button
         class="chip"
         style=${`--it-badge-color:${modeColor(route?.route_type)}`}
+        aria-label=${`${this._t("editorAddLine")}: ${name}`}
         title=${`${this._t("editorAddLine")}: ${name}`}
         @click=${() => this._addLine(name)}
       >
-        <span class="swatch"></span>
+        ${icon(ICONS.plus, { size: 18 })}
         <span class="line-name">${name}</span>
       </button>
     `;

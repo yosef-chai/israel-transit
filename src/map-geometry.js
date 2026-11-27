@@ -176,6 +176,17 @@ export const vehicleSplit = (line, positions, hereIndex, vehicle) => {
 };
 
 /**
+ * How far along the line the vehicle has got, or null when that is unknown.
+ *
+ * A vehicle off the line (a detour, or GPS that drifted) but still near one of
+ * the pattern's stops has got as far as that stop: the same answer the stop
+ * list gives, so the map and the list never disagree about what is behind it.
+ */
+export const vehicleProgress = (line, positions, hereIndex, vehicle) =>
+  vehicleSplit(line, positions, hereIndex, vehicle) ??
+  (hereIndex >= 0 ? (positions[hereIndex] ?? null) : null);
+
+/**
  * Progress along a run that only moves forward.
  *
  * GPS jitter can put a stopped bus a few metres behind where it was; drawing

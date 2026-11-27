@@ -448,7 +448,7 @@
         ed.setConfig({ stop_code: 21023 });
         document.body.appendChild(ed);
         await ed.updateComplete;
-        ed.shadowRoot.querySelector(".selected .chip").click();
+        ed.shadowRoot.querySelector(".picker").click();
         await ed.updateComplete;
         const box = ed.shadowRoot.querySelector("#it-search");
         if (!box) failures.push("no search box after 'change stop'");

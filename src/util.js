@@ -8,12 +8,6 @@ export const DOMAIN = "israel_transit";
 // mixin every time a detail view was closed.
 export const DIALOG_CLOSED = "israel-transit-dialog-closed";
 
-// The integration's brand icon. Home Assistant reads the same files out of the
-// integration's brand/ directory for its own UI (2026.3+); the integration also
-// serves them here so the card can use the mark without chasing the rotating
-// token that /api/brands requires.
-export const BRAND_ICON = `/${DOMAIN}/brand/icon.png`;
-
 // The one place these colours are written down: styles.js turns the light ones
 // into the --it-mode-* custom properties for badges (white text on them is at
 // least 4.5:1), and the map, which paints on a canvas no CSS variable reaches,
