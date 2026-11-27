@@ -19,6 +19,11 @@ export const sharedStyles = css`
   :host {
     ${MODE_VARS}
     display: block;
+    /* Coloured text takes Home Assistant's "on" colours, which are made for
+       text: 7:1 on the light card and 5.7:1 on the dark one. --warning-color
+       and --success-color are fills, at 2:1 and 3.3:1 on white. */
+    --it-text-warning: var(--ha-color-on-warning-normal, #c94e00);
+    --it-text-success: var(--ha-color-on-success-normal, #00883c);
   }
 
   .icon {
@@ -172,6 +177,10 @@ export const sharedStyles = css`
     --it-alert: var(--warning-color, #ffa600);
   }
 
+  .alert.warning .icon {
+    color: var(--it-text-warning);
+  }
+
   .alert.info {
     --it-alert: var(--info-color, #039be5);
   }
@@ -264,6 +273,9 @@ export const cardStyles = css`
        scroll inside it, instead of being clipped. */
     min-height: 0;
     overflow-y: auto;
+    /* Home Assistant's own scrollbar (.ha-scrollbar). */
+    scrollbar-color: var(--scrollbar-thumb-color, rgba(127, 127, 127, 0.5)) transparent;
+    scrollbar-width: thin;
     padding-block-end: var(--ha-space-2, 8px);
   }
 
@@ -356,7 +368,7 @@ export const cardStyles = css`
 
   .eta-now .eta-value {
     font-size: var(--ha-font-size-l, 16px);
-    color: var(--success-color, #43a047);
+    color: var(--it-text-success);
   }
 
   .eta-clock {
@@ -373,12 +385,12 @@ export const cardStyles = css`
   }
 
   .live {
-    color: var(--success-color, #43a047);
+    color: var(--it-text-success);
   }
 
   .delay {
     font-weight: var(--ha-font-weight-medium, 500);
-    color: var(--ha-color-text-warning, var(--warning-color, #ffa600));
+    color: var(--it-text-warning);
   }
 
   .chevron {
@@ -387,10 +399,12 @@ export const cardStyles = css`
   }
 
   /* Times that stopped updating: still the last real answer, so they stay,
-     but greyed until a fresh one arrives. */
-  .rows.stale .eta,
-  .rows.stale .live {
-    opacity: 0.55;
+     in the secondary text colour until a fresh one arrives. Not faded with
+     opacity: that took them below a readable contrast. */
+  .rows.stale .eta-value,
+  .rows.stale .live,
+  .rows.stale .delay {
+    color: var(--secondary-text-color);
   }
 
   /* Genuinely narrow dashboard columns: drop to the essentials. A

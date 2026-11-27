@@ -373,7 +373,9 @@ export class IsraelTransitCard extends LitElement {
   }
 
   _renderHeader(stop) {
-    const title = this._config.title || stop?.name || this._t("loading");
+    // A stop that could not be loaded is named by its code, not left "loading".
+    const fallback = this._error ? `${this._t("stop")} ${this._config.stop_code}` : this._t("loading");
+    const title = this._config.title || stop?.name || fallback;
     const city = this._config.show_city !== false && stop?.city;
     const code = this._config.show_stop_code !== false && stop?.code;
 

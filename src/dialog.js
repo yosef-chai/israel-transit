@@ -199,6 +199,9 @@ export class IsraelTransitDialog extends LitElement {
       min-height: 0;
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* Home Assistant's own scrollbar (.ha-scrollbar). */
+      scrollbar-color: var(--scrollbar-thumb-color, rgba(127, 127, 127, 0.5)) transparent;
+      scrollbar-width: thin;
       padding: 0 var(--ha-space-6, 24px) var(--ha-space-6, 24px);
     }
 

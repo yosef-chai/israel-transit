@@ -80,6 +80,9 @@ export class IsraelTransitCardEditor extends LitElement {
         --it-outline: var(--outline-color, var(--divider-color, rgba(127, 127, 127, 0.3)));
         --it-hover: var(--ha-color-fill-neutral-quiet-hover, rgba(127, 127, 127, 0.08));
         --it-duration: var(--ha-animation-duration-fast, 150ms);
+        /* The semantic secondary text colour: on the dark form background
+           it stays above 4.5:1, where --secondary-text-color is 4.35:1. */
+        --it-secondary: var(--ha-color-text-secondary, var(--secondary-text-color));
       }
 
       .box {
@@ -148,7 +151,7 @@ export class IsraelTransitCardEditor extends LitElement {
         top: 20px;
         inset-inline: var(--ha-space-4, 16px);
         overflow: hidden;
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         font-size: var(--ha-font-size-m, 14px);
         line-height: var(--ha-line-height-condensed, 1.2);
         white-space: nowrap;
@@ -207,12 +210,12 @@ export class IsraelTransitCardEditor extends LitElement {
       .control .end {
         position: absolute;
         inset-inline-end: var(--ha-space-3, 12px);
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         pointer-events: none;
       }
 
       .control > .icon {
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
       }
 
       .hint {
@@ -220,7 +223,7 @@ export class IsraelTransitCardEditor extends LitElement {
         align-items: center;
         min-height: var(--ha-space-5, 20px);
         margin-inline-start: var(--ha-space-4, 16px);
-        color: var(--ha-color-text-secondary, var(--secondary-text-color));
+        color: var(--it-secondary);
         font-size: var(--ha-font-size-s, 12px);
       }
 
@@ -256,7 +259,7 @@ export class IsraelTransitCardEditor extends LitElement {
 
       .secondary {
         overflow: hidden;
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         font-size: var(--ha-font-size-s, 12px);
         line-height: var(--ha-line-height-condensed, 1.2);
         white-space: nowrap;
@@ -275,7 +278,7 @@ export class IsraelTransitCardEditor extends LitElement {
         border: none;
         border-radius: var(--ha-border-radius-circle, 50%);
         background: none;
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         cursor: pointer;
       }
 
@@ -307,6 +310,8 @@ export class IsraelTransitCardEditor extends LitElement {
         margin-block-start: var(--ha-space-2, 8px);
         overflow-y: auto;
         overscroll-behavior: contain;
+        scrollbar-color: var(--scrollbar-thumb-color, rgba(127, 127, 127, 0.5)) transparent;
+        scrollbar-width: thin;
         border: 1px solid var(--it-outline);
         border-radius: var(--ha-border-radius-md, 8px);
       }
@@ -344,7 +349,7 @@ export class IsraelTransitCardEditor extends LitElement {
 
       .status {
         padding: var(--ha-space-2, 8px) var(--ha-space-4, 16px) 0;
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         font-size: var(--ha-font-size-s, 12px);
       }
 
@@ -418,7 +423,7 @@ export class IsraelTransitCardEditor extends LitElement {
       }
 
       .panel summary .icon {
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         transition: transform var(--it-duration) cubic-bezier(0.4, 0, 0.2, 1);
       }
 

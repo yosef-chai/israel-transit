@@ -16,6 +16,11 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
   :host {
     ${h5}
     display: block;
+    /* Coloured text takes Home Assistant's "on" colours, which are made for
+       text: 7:1 on the light card and 5.7:1 on the dark one. --warning-color
+       and --success-color are fills, at 2:1 and 3.3:1 on white. */
+    --it-text-warning: var(--ha-color-on-warning-normal, #c94e00);
+    --it-text-success: var(--ha-color-on-success-normal, #00883c);
   }
 
   .icon {
@@ -169,6 +174,10 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
     --it-alert: var(--warning-color, #ffa600);
   }
 
+  .alert.warning .icon {
+    color: var(--it-text-warning);
+  }
+
   .alert.info {
     --it-alert: var(--info-color, #039be5);
   }
@@ -259,6 +268,9 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
        scroll inside it, instead of being clipped. */
     min-height: 0;
     overflow-y: auto;
+    /* Home Assistant's own scrollbar (.ha-scrollbar). */
+    scrollbar-color: var(--scrollbar-thumb-color, rgba(127, 127, 127, 0.5)) transparent;
+    scrollbar-width: thin;
     padding-block-end: var(--ha-space-2, 8px);
   }
 
@@ -351,7 +363,7 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
 
   .eta-now .eta-value {
     font-size: var(--ha-font-size-l, 16px);
-    color: var(--success-color, #43a047);
+    color: var(--it-text-success);
   }
 
   .eta-clock {
@@ -368,12 +380,12 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
   }
 
   .live {
-    color: var(--success-color, #43a047);
+    color: var(--it-text-success);
   }
 
   .delay {
     font-weight: var(--ha-font-weight-medium, 500);
-    color: var(--ha-color-text-warning, var(--warning-color, #ffa600));
+    color: var(--it-text-warning);
   }
 
   .chevron {
@@ -382,10 +394,12 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
   }
 
   /* Times that stopped updating: still the last real answer, so they stay,
-     but greyed until a fresh one arrives. */
-  .rows.stale .eta,
-  .rows.stale .live {
-    opacity: 0.55;
+     in the secondary text colour until a fresh one arrives. Not faded with
+     opacity: that took them below a readable contrast. */
+  .rows.stale .eta-value,
+  .rows.stale .live,
+  .rows.stale .delay {
+    color: var(--secondary-text-color);
   }
 
   /* Genuinely narrow dashboard columns: drop to the essentials. A
@@ -470,18 +484,18 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
       ${n(H,{size:40})}
       <p class="empty-title">${V}</p>
       ${L?o`<p class="empty-text">${L}</p>`:a}
-    </div>`}_emptyMessage(){return this._config.lines?.length?this._t("noArrivals"):this._data.realtime_error&&!this._data.routes?.length?this._t("noData"):this._data.realtime_error?this._t("noRealtime"):this._t("noArrivals")}_renderHeader(H){let V=this._config.title||H?.name||this._t("loading"),L=this._config.show_city!==!1&&H?.city,r=this._config.show_stop_code!==!1&&H?.code;return o`
+    </div>`}_emptyMessage(){return this._config.lines?.length?this._t("noArrivals"):this._data.realtime_error&&!this._data.routes?.length?this._t("noData"):this._data.realtime_error?this._t("noRealtime"):this._t("noArrivals")}_renderHeader(H){let V=this._error?`${this._t("stop")} ${this._config.stop_code}`:this._t("loading"),L=this._config.title||H?.name||V,r=this._config.show_city!==!1&&H?.city,e=this._config.show_stop_code!==!1&&H?.code;return o`
       <button
         class="header"
         part="header"
-        @click=${e=>this._open("_stopDialog",!0,e)}
-        aria-label=${`${V}. ${this._t("stopDetails")}`}
+        @click=${t=>this._open("_stopDialog",!0,t)}
+        aria-label=${`${L}. ${this._t("stopDetails")}`}
       >
         <div class="titles">
-          <div class="stop-name">${V}</div>
-          ${L||r?o`<div class="stop-meta">
-                ${L?o`<span>${H.city}</span>`:a}
-                ${r?o`<span class="code ltr">${H.code}</span>`:a}
+          <div class="stop-name">${L}</div>
+          ${r||e?o`<div class="stop-meta">
+                ${r?o`<span>${H.city}</span>`:a}
+                ${e?o`<span class="code ltr">${H.code}</span>`:a}
               </div>`:a}
         </div>
         ${n(m.info,{size:24,cls:"icon info"})}
@@ -738,6 +752,9 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
       min-height: 0;
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* Home Assistant's own scrollbar (.ha-scrollbar). */
+      scrollbar-color: var(--scrollbar-thumb-color, rgba(127, 127, 127, 0.5)) transparent;
+      scrollbar-width: thin;
       padding: 0 var(--ha-space-6, 24px) var(--ha-space-6, 24px);
     }
 
@@ -848,7 +865,7 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
   }
 
   .status-sub .stale {
-    color: var(--ha-color-text-warning, var(--warning-color, #ffa600));
+    color: var(--it-text-warning);
   }
 
   .approx {
@@ -1259,6 +1276,9 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
         --it-outline: var(--outline-color, var(--divider-color, rgba(127, 127, 127, 0.3)));
         --it-hover: var(--ha-color-fill-neutral-quiet-hover, rgba(127, 127, 127, 0.08));
         --it-duration: var(--ha-animation-duration-fast, 150ms);
+        /* The semantic secondary text colour: on the dark form background
+           it stays above 4.5:1, where --secondary-text-color is 4.35:1. */
+        --it-secondary: var(--ha-color-text-secondary, var(--secondary-text-color));
       }
 
       .box {
@@ -1327,7 +1347,7 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
         top: 20px;
         inset-inline: var(--ha-space-4, 16px);
         overflow: hidden;
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         font-size: var(--ha-font-size-m, 14px);
         line-height: var(--ha-line-height-condensed, 1.2);
         white-space: nowrap;
@@ -1386,12 +1406,12 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
       .control .end {
         position: absolute;
         inset-inline-end: var(--ha-space-3, 12px);
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         pointer-events: none;
       }
 
       .control > .icon {
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
       }
 
       .hint {
@@ -1399,7 +1419,7 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
         align-items: center;
         min-height: var(--ha-space-5, 20px);
         margin-inline-start: var(--ha-space-4, 16px);
-        color: var(--ha-color-text-secondary, var(--secondary-text-color));
+        color: var(--it-secondary);
         font-size: var(--ha-font-size-s, 12px);
       }
 
@@ -1435,7 +1455,7 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
 
       .secondary {
         overflow: hidden;
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         font-size: var(--ha-font-size-s, 12px);
         line-height: var(--ha-line-height-condensed, 1.2);
         white-space: nowrap;
@@ -1454,7 +1474,7 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
         border: none;
         border-radius: var(--ha-border-radius-circle, 50%);
         background: none;
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         cursor: pointer;
       }
 
@@ -1486,6 +1506,8 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
         margin-block-start: var(--ha-space-2, 8px);
         overflow-y: auto;
         overscroll-behavior: contain;
+        scrollbar-color: var(--scrollbar-thumb-color, rgba(127, 127, 127, 0.5)) transparent;
+        scrollbar-width: thin;
         border: 1px solid var(--it-outline);
         border-radius: var(--ha-border-radius-md, 8px);
       }
@@ -1523,7 +1545,7 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
 
       .status {
         padding: var(--ha-space-2, 8px) var(--ha-space-4, 16px) 0;
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         font-size: var(--ha-font-size-s, 12px);
       }
 
@@ -1597,7 +1619,7 @@ var L5=Object.defineProperty;var M5=(M,C,H)=>C in M?L5(M,C,{enumerable:!0,config
       }
 
       .panel summary .icon {
-        color: var(--secondary-text-color);
+        color: var(--it-secondary);
         transition: transform var(--it-duration) cubic-bezier(0.4, 0, 0.2, 1);
       }
 

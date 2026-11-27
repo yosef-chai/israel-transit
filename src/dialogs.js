@@ -171,7 +171,7 @@ const dialogStyles = css`
   }
 
   .status-sub .stale {
-    color: var(--ha-color-text-warning, var(--warning-color, #ffa600));
+    color: var(--it-text-warning);
   }
 
   .approx {
