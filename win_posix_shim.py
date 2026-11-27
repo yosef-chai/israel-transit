@@ -25,6 +25,7 @@ real descriptor limit, that test wants a Linux runner, not a better stub.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import types
 from typing import Any
@@ -62,6 +63,12 @@ def _install() -> None:
 
 
 _install()
+
+# גרסאות HA חדשות מחליפות את httpx ב-httpx2 בזמן import, ונכשלות אם httpx כבר נטען.
+# הפלאגין respx מייבא httpx, וסדר הטעינה של ה-entry points אקראי.
+# לכן מייבאים את HA כאן: מה שנטען עם -p קודם לכל ה-entry points.
+with contextlib.suppress(ImportError):
+    import homeassistant  # noqa: F401
 
 
 def pytest_runtest_setup() -> None:
