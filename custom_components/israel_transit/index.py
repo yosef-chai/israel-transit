@@ -14,7 +14,8 @@ import logging
 import shutil
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections import OrderedDict
+from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -35,8 +36,10 @@ from .const import (
     ISSUE_INDEX_STALE,
     NEARBY_SEARCH_BOXES,
     NEXT_SERVICE_DAYS,
+    PROFILE_CACHE_SIZE,
     TIMETABLE_LOOKBACK,
 )
+from .estimate import Profile
 from .gtfs import (
     CALENDAR_MEMBERS,
     MEMBERS,
@@ -63,6 +66,7 @@ from .gtfs import (
     stored_schema,
     stored_stop_codes,
     stored_version,
+    trip_profiles,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -102,6 +106,8 @@ class GtfsIndex:
         self._retry: CALLBACK_TYPE | None = None
         self.last_build: dict[str, int] | None = None
         self.last_error: str | None = None
+        # פרופילים מפוענחים: אותן נסיעות נשאלות כל דקה כש-curlbus למטה.
+        self._profiles: OrderedDict[int, Profile] = OrderedDict()
 
     @property
     def available(self) -> bool:
@@ -233,6 +239,7 @@ class GtfsIndex:
         self._retry = async_call_later(self._hass, delay, _async_retry)
 
     async def async_close(self) -> None:
+        self._profiles.clear()
         self._indexed_stops = frozenset()
         self._built = None
         self._coverage_end = None
@@ -488,3 +495,26 @@ class GtfsIndex:
             moment + timedelta(hours=hours),
             self._max_sec,
         )
+
+    async def async_trip_profiles(self, trip_idxs: Iterable[int]) -> dict[int, Profile]:
+        """פרופילי הזמנים של הנסיעות, מה-cache או בקריאת executor אחת לחסרים."""
+        wanted = set(trip_idxs)
+        if not wanted:
+            return {}
+        cache = self._profiles
+        found = {idx: cache[idx] for idx in wanted if idx in cache}
+        for idx in found:
+            cache.move_to_end(idx)
+        missing = wanted - found.keys()
+        if not missing:
+            return found
+        connection = self._connection
+        loaded = await self._query(trip_profiles, missing)
+        # אינדקס שהוחלף באמצע לא ממלא את ה-cache של החדש.
+        if connection is self._connection:
+            for idx, profile in loaded.items():
+                cache[idx] = profile
+            while len(cache) > PROFILE_CACHE_SIZE:
+                cache.popitem(last=False)
+        found.update(loaded)
+        return found

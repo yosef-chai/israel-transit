@@ -200,6 +200,12 @@ class Arrival:
     # מזהה המפעיל ותחנת היעד, לזיהוי נסיעה כשה-route_id לא מוכר.
     operator_id: str | None = None
     dest_code: int | None = None
+    # זמן שנגזר ממיקום הרכב מול לוח הזמנים, ולא ETA של המפעיל.
+    estimated: bool = False
+    # פנימי, מלוח הזמנים: הנסיעה באינדקס, מקומה בה, וקידומת ה-trip_id.
+    trip_idx: int | None = None
+    stop_seq: int | None = None
+    journey_ref: int | None = None
 
     def as_dict(self, lang: str = "he", now: datetime | None = None) -> dict[str, Any]:
         return {
@@ -223,6 +229,7 @@ class Arrival:
             "scheduled": self.scheduled.isoformat() if self.scheduled else None,
             "cancelled": self.cancelled,
             "train_number": self.train_number,
+            "estimated": self.estimated,
         }
 
 

@@ -233,6 +233,7 @@ class ArrivalCountSensor(IsraelTransitEntity):
             "stop_code": data.stop.code,
             "stop_name": data.stop.name,
             "has_realtime": data.has_realtime,
+            "realtime_source": data.realtime_source,
             "updated_at": data.updated_at,
             "arrivals": [a.as_dict(self._language, now) for a in arrivals],
             "lines": sorted({a.line_name for a in arrivals}),

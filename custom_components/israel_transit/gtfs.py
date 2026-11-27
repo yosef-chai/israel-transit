@@ -55,6 +55,7 @@ from .api import (
     line_sort_key,
 )
 from .const import GTFS_URL, NON_REALTIME_ROUTE_TYPES, USER_AGENT
+from .estimate import Profile
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ _MAX_SEARCH_WORDS: Final = 4
 # Bumped whenever the tables below change shape. An index built by an older
 # version stays in use while its replacement is built, as long as it has every
 # column the queries read; one older than that is discarded.
-SCHEMA_VERSION: Final = 4
+SCHEMA_VERSION: Final = 5
 # The oldest schema the current queries can still read: one that has every
 # column they select. route_shape and routes_at_stop cope with the tables an
 # older index lacks; departures_at fails on one, and callers already degrade.
@@ -123,10 +124,15 @@ CREATE TABLE patterns (
 CREATE TABLE departures (
     stop_code INTEGER NOT NULL, route_id INTEGER NOT NULL,
     service_id INTEGER NOT NULL, arrival_sec INTEGER NOT NULL,
-    trip_idx INTEGER NOT NULL
+    trip_idx INTEGER NOT NULL, seq INTEGER
 );
 CREATE TABLE trips (
-    trip_idx INTEGER PRIMARY KEY, origin_sec INTEGER, dest_code INTEGER
+    trip_idx INTEGER PRIMARY KEY, origin_sec INTEGER, dest_code INTEGER,
+    journey_ref INTEGER
+);
+CREATE TABLE trip_profiles (
+    trip_idx INTEGER PRIMARY KEY, seqs BLOB NOT NULL, dists BLOB NOT NULL,
+    arrs BLOB NOT NULL, deps BLOB
 );
 CREATE TABLE calendar (
     service_id INTEGER PRIMARY KEY, days INTEGER NOT NULL,
@@ -733,6 +739,7 @@ def stage_index(
         stats["stop_times_scanned"] = scan.scanned
         stats["patterns"] = scan.patterns
         stats["departures"] = scan.departures
+        stats["profiles"] = scan.profiles
         stats["origin_violations"] = scan.violations
         if scan.violations:
             _LOGGER.warning(
@@ -849,6 +856,10 @@ class _Block:
     last_seq: int | None = None
     valid: bool = True
     kept: bool = False
+    # שורות הנסיעה (seq, arrival, departure, dist) לפרופיל, ואינדקס העצירה
+    # המבוקשת האחרונה בהן. נאסף רק כשיש תחנות מבוקשות.
+    rows: list[tuple[int, int, str, str]] = field(default_factory=list)
+    last_wanted: int = -1
 
 
 @dataclass(slots=True)
@@ -860,10 +871,11 @@ class _Scan:
     departures: int = 0
     violations: int = 0
     max_sec: int = 0
+    profiles: int = 0
     serving: set[int] = field(default_factory=set)
     # שורות בתחנה מוגדרת של נסיעה שה-route שלה עוד לא ידוע:
-    # (trip_id, stop_code, arrival_sec, trip_idx).
-    pending: list[tuple[str, int, int, int]] = field(default_factory=list)
+    # (trip_id, stop_code, arrival_sec, trip_idx, seq).
+    pending: list[tuple[str, int, int, int, int]] = field(default_factory=list)
 
 
 class _Writer:
@@ -907,23 +919,34 @@ def _scan_stop_times(connection: sqlite3.Connection, path: Path, feed: _Feed) ->
         )
     except ValueError as err:
         raise GtfsError(f"stop_times.txt lacks a column: {err}") from err
-    width = max(i_trip, i_arr, i_dep, i_stop, i_seq)
+    # אופציונלי בתקן; בלעדיו הפרופיל נשען על stop_sequence בלבד.
+    i_dist = (
+        columns.index("shape_dist_traveled") if "shape_dist_traveled" in columns else -1
+    )
+    width = max(i_trip, i_arr, i_dep, i_stop, i_seq, i_dist)
     routes, stops, wanted_stop_ids = feed.routes, feed.stops, feed.wanted_stop_ids
     extra_stop_codes = feed.extra_stop_codes
 
     scan = _Scan()
     patterns = _Writer(connection, "INSERT INTO patterns VALUES (?,?,?,?)")
-    departures = _Writer(connection, "INSERT INTO departures VALUES (?,?,?,?,?)")
-    trips = _Writer(connection, "INSERT INTO trips VALUES (?,?,?)")
+    departures = _Writer(connection, "INSERT INTO departures VALUES (?,?,?,?,?,?)")
+    trips = _Writer(connection, "INSERT INTO trips VALUES (?,?,?,?)")
+    profiles = _Writer(connection, "INSERT INTO trip_profiles VALUES (?,?,?,?,?)")
 
     def close(block: _Block) -> None:
         if not block.kept:
             return
+        journey = _journey_ref(block.trip_id)
         if not block.valid:
             scan.violations += 1
-            trips.add((block.idx, None, None))
-        else:
-            trips.add((block.idx, block.origin, block.dest))
+            trips.add((block.idx, None, None, journey))
+            return
+        trips.add((block.idx, block.origin, block.dest, journey))
+        if block.last_wanted >= 0:
+            profiles.add(
+                (block.idx, *_profile_blobs(block.rows[: block.last_wanted + 1]))
+            )
+            scan.profiles += 1
 
     block: _Block | None = None
     for line in lines:
@@ -966,10 +989,14 @@ def _scan_stop_times(connection: sqlite3.Connection, path: Path, feed: _Feed) ->
         stop = stops.get(stop_id)
         # היעד הוא תחנת השורה האחרונה ברצף, גם אם היא לא נשמרת לשום טבלה.
         block.dest = stop[0] if stop is not None else None
-        if stop is None:
-            continue
         arrival = _seconds(fields[i_arr])
-        if arrival is None:
+        if wanted_stop_ids and arrival is not None:
+            block.rows.append(
+                (seq, arrival, fields[i_dep], fields[i_dist] if i_dist >= 0 else "")
+            )
+            if stop_id in wanted_stop_ids:
+                block.last_wanted = len(block.rows) - 1
+        if stop is None or arrival is None:
             continue
         code = stop[0]
 
@@ -983,22 +1010,64 @@ def _scan_stop_times(connection: sqlite3.Connection, path: Path, feed: _Feed) ->
                 scan.serving.add(route_id)
         if block.timetable is not None:
             route_id = routes[block.timetable[0]][0]
-            departures.add((code, route_id, block.timetable[1], arrival, block.idx))
+            departures.add(
+                (code, route_id, block.timetable[1], arrival, block.idx, seq)
+            )
             scan.departures += 1
             block.kept = True
             scan.max_sec = max(scan.max_sec, arrival)
             if code in extra_stop_codes:
                 scan.serving.add(route_id)
         elif stop_id in wanted_stop_ids:
-            scan.pending.append((trip_id, code, arrival, block.idx))
+            scan.pending.append((trip_id, code, arrival, block.idx, seq))
             block.kept = True
             scan.max_sec = max(scan.max_sec, arrival)
 
     if block is not None:
         close(block)
-    for writer in (patterns, departures, trips):
+    for writer in (patterns, departures, trips, profiles):
         writer.flush()
     return scan
+
+
+def _journey_ref(trip_id: str) -> int | None:
+    """הקידומת של trip_id עד '_', כפי ש-SIRI שולח ב-DatedVehicleJourneyRef.
+
+    תואם רק בפורמט הישן: ב-v4 ה-trip_id הוא מספר אחר, ואז זה רק לא עוזר.
+    """
+    head = trip_id.split("_", 1)[0]
+    return int(head) if head.isdigit() and len(head) < 19 else None
+
+
+def _dist_value(text: str) -> int:
+    """shape_dist_traveled במטרים, או ‎-1 כשחסר, שלילי או לא מספר."""
+    text = text.strip()
+    if text.isdigit():
+        return int(text)
+    try:
+        value = round(float(text))
+    except ValueError:
+        return -1
+    return value if value >= 0 else -1
+
+
+def _profile_blobs(
+    rows: list[tuple[int, int, str, str]],
+) -> tuple[bytes, bytes, bytes, bytes | None]:
+    """הפרופיל כמערכי int דחוסים. deps הוא None כשהוא זהה ל-arrs, כמעט תמיד."""
+    seqs = array("i", (row[0] for row in rows))
+    arrs = array("i", (row[1] for row in rows))
+    deps = array("i")
+    for _, arrival, dep_text, _ in rows:
+        departure = _seconds(dep_text)
+        deps.append(departure if departure is not None else arrival)
+    dists = array("i", (_dist_value(row[3]) for row in rows))
+    return (
+        seqs.tobytes(),
+        dists.tobytes(),
+        arrs.tobytes(),
+        None if deps == arrs else deps.tobytes(),
+    )
 
 
 def _resolve_pending(
@@ -1008,7 +1077,7 @@ def _resolve_pending(
     scan: _Scan,
 ) -> None:
     """משלים route ושירות לשורות של תחנות מוגדרות, במעבר זול שני על trips.txt."""
-    wanted_trips = {trip_id for trip_id, _, _, _ in scan.pending}
+    wanted_trips = {trip_id for trip_id, *_ in scan.pending}
     resolved: dict[str, tuple[int, int]] = {}
     for row in _member_rows(trips_path):
         trip_id = row.get("trip_id", "")
@@ -1016,10 +1085,10 @@ def _resolve_pending(
             continue
         if route := routes.get(row.get("route_id", "")):
             resolved[trip_id] = (route[0], _int(row.get("service_id")))
-    departures = _Writer(connection, "INSERT INTO departures VALUES (?,?,?,?,?)")
-    for trip_id, code, arrival, trip_idx in scan.pending:
+    departures = _Writer(connection, "INSERT INTO departures VALUES (?,?,?,?,?,?)")
+    for trip_id, code, arrival, trip_idx, seq in scan.pending:
         if (entry := resolved.get(trip_id)) is not None:
-            departures.add((code, entry[0], entry[1], arrival, trip_idx))
+            departures.add((code, entry[0], entry[1], arrival, trip_idx, seq))
             scan.departures += 1
             scan.serving.add(entry[0])
     departures.flush()
@@ -1125,9 +1194,8 @@ def service_day_base(day: date) -> datetime:
 
 # שירות פעיל ביום מסוים: calendar פחות חריגים מסוג 2, ובנוסף חריגים מסוג 1.
 _DEPARTURES_SQL: Final = """
-SELECT d.route_id, d.arrival_sec, r.short_name, r.long_name,
-       r.agency, r.route_type, r.headsign, r.agency_id,
-       t.origin_sec, t.dest_code
+SELECT d.*, r.short_name, r.long_name,
+       r.agency, r.route_type, r.headsign, r.agency_id, t.*
   FROM departures d
   JOIN routes r ON r.route_id = d.route_id
   LEFT JOIN trips t ON t.trip_idx = d.trip_idx
@@ -1153,6 +1221,10 @@ class ScheduledRow:
     row: sqlite3.Row
     when: datetime
     origin: datetime | None
+    # לזיהוי הרכב בתמונת ה-SIRI. None באינדקס מגרסת schema שלא שמרה אותם.
+    trip_idx: int | None = None
+    seq: int | None = None
+    journey_ref: int | None = None
 
 
 def departures_at(
@@ -1207,6 +1279,9 @@ def _departures(
                 "day": stamp,
             },
         ).fetchall()
+        # השאילתה בוחרת d.* ו-t.* כדי שאינדקס ישן, בלי seq ו-journey_ref, עדיין ייקרא.
+        keys = set(rows[0].keys()) if rows else set()
+        has_seq, has_journey = "seq" in keys, "journey_ref" in keys
         for row in rows:
             origin = row["origin_sec"]
             results.append(
@@ -1218,6 +1293,9 @@ def _departures(
                     (base + timedelta(seconds=origin)).astimezone(ISRAEL_TZ)
                     if origin is not None
                     else None,
+                    row["trip_idx"],
+                    row["seq"] if has_seq else None,
+                    row["journey_ref"] if has_journey else None,
                 )
             )
     results.sort(key=lambda item: item.when)
@@ -1392,6 +1470,36 @@ def scheduled_arrivals(
     ]
 
 
+_PROFILE_CHUNK: Final = 500
+
+
+def trip_profiles(
+    connection: sqlite3.Connection, trip_idxs: Iterable[int]
+) -> dict[int, Profile]:
+    """הפרופילים של הנסיעות האלה, מפוענחים. אינדקס בלי הטבלה מחזיר ריק."""
+    wanted = sorted(set(trip_idxs))
+    found: dict[int, Profile] = {}
+    try:
+        for start in range(0, len(wanted), _PROFILE_CHUNK):
+            chunk = wanted[start : start + _PROFILE_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            for row in connection.execute(
+                "SELECT trip_idx, seqs, dists, arrs, deps FROM trip_profiles "
+                f"WHERE trip_idx IN ({marks})",
+                chunk,
+            ):
+                try:
+                    found[row["trip_idx"]] = Profile.from_blobs(
+                        row["seqs"], row["dists"], row["arrs"], row["deps"]
+                    )
+                except ValueError:
+                    continue
+    except sqlite3.OperationalError:
+        # schema ישן בלי trip_profiles: אין ממה לגזור הערכה עד הבנייה הבאה.
+        return {}
+    return found
+
+
 def next_scheduled(
     connection: sqlite3.Connection,
     code: int,
@@ -1421,4 +1529,7 @@ def _scheduled_arrival(item: ScheduledRow) -> Arrival:
         origin=item.origin,
         operator_id=row["agency_id"] or None,
         dest_code=row["dest_code"],
+        trip_idx=item.trip_idx,
+        stop_seq=item.seq,
+        journey_ref=item.journey_ref,
     )

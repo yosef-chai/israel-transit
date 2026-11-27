@@ -441,11 +441,19 @@ export class IsraelTransitCard extends LitElement {
     return this._t("noArrivals");
   }
 
-  /** זמן אמת נפל, ובתחנה יש קו שבדרך כלל משדר אותו. */
+  /** זמן אמת נפל בלי גיבוי, ובתחנה יש קו שבדרך כלל משדר אותו. */
   _timetableOnly() {
     return Boolean(
-      this._data?.realtime_error && this._data.routes?.some((route) => route.has_realtime),
+      this._data?.realtime_error &&
+        !this._data.has_realtime &&
+        this._data.routes?.some((route) => route.has_realtime),
     );
+  }
+
+  /** "דווח לפני פחות מדקה" או "לפני N דק׳". הכרטיס מתעדכן כל 10 שנ', ולכן בלי שניות. */
+  _estimatedHint(arrival) {
+    const age = dataAgeMinutes(arrival.vehicle_seen, this._clockOffset ?? 0);
+    return !age ? this._t("estimatedHintNow") : this._t("estimatedHint", { n: age });
   }
 
   _renderHeader(stop) {
@@ -528,7 +536,11 @@ export class IsraelTransitCard extends LitElement {
           arrival.cancelled ? this._t("cancelled") : "",
           when,
           delayText,
-          arrival.is_realtime ? this._t("live") : this._t("scheduled"),
+          arrival.estimated
+            ? this._estimatedHint(arrival)
+            : arrival.is_realtime
+              ? this._t("live")
+              : this._t("scheduled"),
           this._leaveText(leave),
         ]
           .filter(Boolean)
@@ -618,6 +630,12 @@ export class IsraelTransitCard extends LitElement {
       config.show_realtime_tag !== false && !arrival.is_realtime
         ? html`<span class="tag timetable"
             >${icon(ICONS.timetable, { size: 14 })}${this._t("scheduled")}</span
+          >`
+        : nothing,
+      // זמן שנגזר ממיקום הרכב ולא מהמפעיל: מסומן תמיד, עם גיל הדיווח.
+      arrival.estimated
+        ? html`<span class="tag estimated" title=${this._estimatedHint(arrival)}
+            >${this._t("estimated")}</span
           >`
         : nothing,
       config.show_platform !== false && arrival.platform

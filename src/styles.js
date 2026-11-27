@@ -63,7 +63,8 @@ export const sharedStyles = css`
     white-space: nowrap;
   }
 
-  .tag.timetable {
+  .tag.timetable,
+  .tag.estimated {
     color: var(--secondary-text-color);
   }
 

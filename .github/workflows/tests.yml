@@ -37,7 +37,7 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-      - run: pip install pytest pytest-asyncio aiohttp voluptuous
+      - run: pip install pytest pytest-asyncio aiohttp voluptuous Brotli
       - run: python -m pytest -q
 
   homeassistant:

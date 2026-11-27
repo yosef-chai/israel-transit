@@ -27,10 +27,13 @@ rules:
       results, an unreachable data source, a duplicate stop, and both
       reconfigure outcomes. config_flow.py is at 100%.
   dependency-transparency:
-    status: exempt
+    status: done
     comment: >-
-      There are no third-party requirements. Every line of the clients, the GTFS
-      reader and the index lives in this repository and is reviewable here.
+      The one requirement is Brotli (google/brotli, MIT, published to PyPI from
+      its public repository with tagged releases), the version floor Home
+      Assistant itself sets in package_constraints.txt. It decodes the Open Bus
+      SIRI snapshot. Every line of the clients, the GTFS reader and the index
+      lives in this repository and is reviewable here.
   docs-actions:
     status: done
     comment: >-
@@ -165,9 +168,10 @@ rules:
   async-dependency:
     status: exempt
     comment: >-
-      There is no external dependency, which the rule says it then does not
-      apply to. All I/O is aiohttp; the CPU-bound GTFS parse and the SQLite
-      reads run in the executor so the event loop is never blocked.
+      No dependency does I/O, which is what the rule is about. All I/O is
+      aiohttp; Brotli is a decompression codec, and it, the CPU-bound GTFS
+      parse, the snapshot parse and the SQLite reads run in the executor so the
+      event loop is never blocked.
   inject-websession:
     status: done
     comment: >-

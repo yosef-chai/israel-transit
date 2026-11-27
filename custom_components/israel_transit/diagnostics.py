@@ -8,6 +8,7 @@ a stop near home plus a time of day says more than it should.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -36,12 +37,26 @@ def _stop_diagnostics(
         "resolved": data.stop.as_dict() if data else None,
         "has_realtime": data.has_realtime if data else None,
         "realtime_error": data.realtime_error if data else None,
+        "realtime_source": data.realtime_source if data else None,
         "updated_at": data.updated_at.isoformat() if data else None,
         # The arrivals themselves, since a wrong time is the usual report.
         "arrivals": [a.as_dict(hass.config.language) for a in data.arrivals]
         if data
         else [],
         "routes": [r.as_dict() for r in data.routes] if data else [],
+    }
+
+
+def _open_bus_diagnostics(clients: Clients | None) -> dict[str, Any]:
+    """מצב הגיבוי מתמונת הסדנא: גיל התמונה, כמה רכבים נקראו, ושגיאה אחרונה."""
+    client = clients.open_bus if clients else None
+    snapshot = client.snapshot if client else None
+    return {
+        "snapshot_age_s": round(time.time() - snapshot.taken_at) if snapshot else None,
+        "seen": snapshot.seen if snapshot else None,
+        "dropped": snapshot.dropped if snapshot else None,
+        "lines": len(snapshot.by_line) if snapshot else None,
+        "last_error": client.last_error if client else None,
     }
 
 
@@ -70,6 +85,7 @@ async def async_get_config_entry_diagnostics(
             "indexed_stops": sorted(index.indexed_stops) if index else [],
             "card_stops": sorted(clients.stops.codes) if clients else [],
         },
+        "open_bus": _open_bus_diagnostics(clients),
     }
     return async_redact_data(diagnostics, TO_REDACT)
 

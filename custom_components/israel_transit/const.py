@@ -225,5 +225,24 @@ TRIGGER_MAX_AGE: Final = timedelta(hours=2)
 TRIGGER_MAX_OFFSET: Final = timedelta(hours=2)
 
 ATTRIBUTION: Final = (
-    "Ministry of Transport GTFS and SIRI (via curlbus), and Israel Railways"
+    "Ministry of Transport GTFS and SIRI (via curlbus and the Public Knowledge "
+    "Workshop's open-bus), and Israel Railways"
 )
+
+# --- Open Bus SIRI snapshot (גיבוי כש-curlbus נכשל) -------------------------
+# hasadna/open-bus-siri-requester: תמונה ארצית כל ~60 שנ', daemon_status.json
+# מצביע על האחרונה. https://github.com/hasadna/open-bus-siri-requester
+OPEN_BUS_BASE: Final = "https://open-bus-siri-requester.hasadna.org.il"
+OPEN_BUS_TIMEOUT: Final = 15
+OPEN_BUS_CONNECT_TIMEOUT: Final = 5
+# הסף שה-health check של הסדנא עצמה מתריע אחריו.
+OPEN_BUS_MAX_AGE: Final = 240.0
+# אחרי תמונה חדשה הבאה תגיע בעוד כדקה; כשה-id לא זז, בודקים שוב מהר יותר.
+OPEN_BUS_AFTER_NEW: Final = 50.0
+OPEN_BUS_AFTER_SAME: Final = 15.0
+OPEN_BUS_BACKOFF: Final = (60.0, 120.0, 300.0, 600.0)
+OPEN_BUS_MAX_STATUS_BYTES: Final = 4096
+OPEN_BUS_MAX_BODY_BYTES: Final = 8 * 1024 * 1024
+OPEN_BUS_MAX_JSON_BYTES: Final = 32 * 1024 * 1024
+# כמה פרופילי נסיעה מפוענחים נשמרים בזיכרון.
+PROFILE_CACHE_SIZE: Final = 1024

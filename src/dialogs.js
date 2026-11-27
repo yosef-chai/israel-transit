@@ -1091,9 +1091,11 @@ export class IsraelTransitOverviewDialog extends DialogBase {
                       <div class="item-title">${arrival.destination || arrival.line_name}</div>
                       <div class="item-sub">
                         ${arrival.vehicle_lat != null
-                          ? arrival.is_realtime
-                            ? this._t("live")
-                            : this._t("scheduled")
+                          ? arrival.estimated
+                            ? this._t("estimated")
+                            : arrival.is_realtime
+                              ? this._t("live")
+                              : this._t("scheduled")
                           : this._t("noPositionShort")}
                       </div>
                     </div>

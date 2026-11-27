@@ -117,6 +117,10 @@
         <israel-transit-card id="rt-down"></israel-transit-card>
       </div>
       <div class="col">
+        <h3>curlbus 500, estimated from open-bus (21730)</h3>
+        <israel-transit-card id="estimated"></israel-transit-card>
+      </div>
+      <div class="col">
         <h3>Board five minutes old (21024)</h3>
         <israel-transit-card id="old"></israel-transit-card>
       </div>
@@ -277,6 +281,34 @@
           ...a, is_realtime: false, delay_minutes: null, cancelled: false,
         })),
       };
+      // curlbus נכשל: הזמנים משוערים ממיקום הרכב בתמונת open-bus.
+      FIXTURES[21730] = {
+        ...FIXTURES[21023],
+        stop: { ...FIXTURES[21023].stop, code: 21730, name: "ז'בוטינסקי/בית החייל", city: "בני ברק" },
+        has_realtime: true,
+        realtime_error: "curlbus HTTP 500 for stop 21730",
+        realtime_source: "open_bus",
+        arrivals: [
+          {
+            line_name: "400", line_ref: "10785", destination: "ת. מרכזית ירושלים",
+            operator: "אגד", route_type: "3", is_realtime: true, estimated: true,
+            eta: iso(2), scheduled: iso(-4), delay_minutes: 6, departed: iso(-60),
+            vehicle_ref: "23394902", vehicle_lat: 32.0927, vehicle_lon: 34.8356,
+            vehicle_seen: iso(-0.5),
+          },
+          {
+            line_name: "37", line_ref: "31877", destination: "ת. מרכזית פתח תקווה",
+            operator: "אקסטרה", route_type: "3", is_realtime: true, estimated: true,
+            eta: iso(7), scheduled: iso(-2), delay_minutes: 9, departed: iso(-50),
+            vehicle_ref: "38721104", vehicle_lat: 32.0928, vehicle_lon: 34.8378,
+            vehicle_seen: iso(-3),
+          },
+          {
+            line_name: "401", line_ref: "43866", destination: "ת. מרכזית ירושלים",
+            operator: "אגד", route_type: "3", is_realtime: false, eta: iso(9),
+          },
+        ],
+      };
       // השרת עונה, אבל הלוח לא התעדכן חמש דקות.
       FIXTURES[21024] = {
         ...FIXTURES[21023],
@@ -384,6 +416,7 @@
       mount("tram", { stop_code: 6185, max_arrivals: 4 });
       mount("broken", { stop_code: 35962 });
       mount("rt-down", { stop_code: 20092 });
+      mount("estimated", { stop_code: 21730 });
       mount("old", { stop_code: 21024, max_arrivals: 3 });
       mount("building", { stop_code: 11111 });
       mount("narrow", { stop_code: 21023, lines: ["36"], max_arrivals: 3 });

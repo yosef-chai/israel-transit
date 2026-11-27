@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from time import monotonic
@@ -47,9 +48,14 @@ from .const import (
     SPARSE_POLL,
     TIMETABLE_REQUEST_COOLDOWN,
 )
+from .estimate import Profile, estimable, estimate_board
 from .index import GtfsIndex
 from .merge import merge_board
+from .open_bus import OpenBusClient, Snapshot
 from .stop_registry import StopRegistry
+
+SOURCE_CURLBUS = "curlbus"
+SOURCE_OPEN_BUS = "open_bus"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +81,8 @@ class StopData:
     routes: list[RouteInfo] = field(default_factory=list)
     has_realtime: bool = False
     realtime_error: str | None = None
+    # מאיפה הזמנים החיים: "curlbus", "open_bus" (משוער לפי מיקום) או None.
+    realtime_source: str | None = None
     # מתי הלוח נשלף, ב-UTC. לוח ישן מוגש לפעמים בכוונה, ואז זה מה שמסגיר אותו.
     updated_at: datetime = field(default_factory=dt_util.utcnow)
     # הנסיעה המתוכננת הבאה, רק כשאין כלום בשעות הקרובות (לילה, שבת, חג).
@@ -106,6 +114,7 @@ class StopData:
             "routes": [r.as_dict() for r in self.routes],
             "has_realtime": self.has_realtime,
             "realtime_error": self.realtime_error,
+            "realtime_source": self.realtime_source,
             "updated_at": self.updated_at.isoformat(),
             "next_service": (
                 self.next_service.as_dict(lang, now) if self.next_service else None
@@ -142,6 +151,7 @@ class Clients:
         self.hass = hass
         self.curlbus = CurlbusClient(session)
         self.rail = RailClient(session)
+        self.open_bus = OpenBusClient(session, hass.async_add_executor_job)
         self.index = GtfsIndex(hass)
         self.stops = StopRegistry(hass)
         self._pending_index: CALLBACK_TYPE | None = None
@@ -303,13 +313,23 @@ async def async_fetch_stop(
         _LOGGER.debug("No timetable for stop %s: %s", stop_code, err)
         scheduled = []
 
+    # An empty answer is still a real-time answer: nothing is due.
+    source: str | None = SOURCE_CURLBUS if realtime_error is None else None
+    if realtime_error is not None and any(estimable(row) for row in scheduled):
+        # curlbus לא ענה: מיקום הרכבים מתמונת הסדנא, מול לוח הזמנים.
+        fallback = await _async_estimated(clients, stop_code, scheduled)
+        if fallback is not None:
+            realtime, passed = fallback
+            scheduled = [row for row in scheduled if id(row) not in passed]
+            source = SOURCE_OPEN_BUS
+
     data = StopData(
         stop=stop,
         arrivals=merge_board(realtime, scheduled, rail, routes, dt_util.utcnow()),
         routes=routes,
-        # An empty answer is still a real-time answer: nothing is due.
-        has_realtime=realtime_error is None,
+        has_realtime=source is not None,
         realtime_error=realtime_error,
+        realtime_source=source,
     )
     # רק לתחנה שלוח הזמנים המלא שלה באינדקס: באחרת לוח ריק לא אומר שאין שירות,
     # כי האוטובוסים שלה בכלל לא נשמרו.
@@ -319,6 +339,39 @@ async def async_fetch_stop(
         except IsraelTransitError as err:
             _LOGGER.debug("No next service for stop %s: %s", stop_code, err)
     return data
+
+
+async def _async_estimated(
+    clients: Clients, stop_code: int, scheduled: list[Arrival]
+) -> tuple[list[Arrival], set[int]] | None:
+    """שורות משוערות לפי מיקום, או None כשהתמונה או הפרופילים לא זמינים."""
+    trip_idxs = {row.trip_idx for row in scheduled if estimable(row)}
+
+    async def snapshot() -> Snapshot | None:
+        try:
+            return await clients.open_bus.async_snapshot()
+        except IsraelTransitError as err:
+            _LOGGER.debug("No Open Bus snapshot for stop %s: %s", stop_code, err)
+            return None
+
+    async def profiles() -> dict[int, Profile]:
+        try:
+            return await clients.index.async_trip_profiles(
+                idx for idx in trip_idxs if idx is not None
+            )
+        except IsraelTransitError as err:
+            _LOGGER.debug("No trip profiles for stop %s: %s", stop_code, err)
+            return {}
+
+    async with asyncio.TaskGroup() as group:
+        snapshot_task = group.create_task(snapshot())
+        profiles_task = group.create_task(profiles())
+    held = snapshot_task.result()
+    if held is None:
+        return None
+    return estimate_board(
+        scheduled, held.by_line, profiles_task.result(), int(time.time())
+    )
 
 
 async def _async_live(
@@ -374,7 +427,8 @@ class IsraelTransitCoordinator(DataUpdateCoordinator[StopData]):
         self.subentry = subentry
         self.stop_code = int(subentry.data[CONF_STOP_CODE])
         # None until the first read, so the first one is not logged as news.
-        self._realtime_ok: bool | None = None
+        self._realtime_source: str | None = None
+        self._realtime_logged = False
         interval = subentry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         # הקצב שהמשתמש בחר. update_interval זז ממנו למעלה כשאין מה לראות.
         self.base_interval = timedelta(seconds=int(interval))
@@ -450,15 +504,23 @@ class IsraelTransitCoordinator(DataUpdateCoordinator[StopData]):
         Losing it is not a failed update -- the board falls back to the
         timetable -- so the coordinator's own unavailable logging never sees it.
         """
-        ok = data.realtime_error is None
-        if ok == self._realtime_ok:
+        source = data.realtime_source
+        if source == self._realtime_source and self._realtime_logged:
             return
-        if not ok:
+        if source == SOURCE_OPEN_BUS:
+            _LOGGER.info(
+                "curlbus is unavailable for stop %s (%s); estimating arrivals "
+                "from Open Bus vehicle positions",
+                self.stop_code,
+                data.realtime_error,
+            )
+        elif source is None:
             _LOGGER.info(
                 "Real-time is unavailable for stop %s, showing the timetable: %s",
                 self.stop_code,
                 data.realtime_error,
             )
-        elif self._realtime_ok is not None:
+        elif self._realtime_logged:
             _LOGGER.info("Real-time is back for stop %s", self.stop_code)
-        self._realtime_ok = ok
+        self._realtime_source = source
+        self._realtime_logged = True

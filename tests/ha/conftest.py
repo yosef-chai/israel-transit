@@ -13,7 +13,12 @@ from homeassistant.config_entries import ConfigSubentryData
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
-from custom_components.israel_transit.api import Arrival, RouteInfo, Stop
+from custom_components.israel_transit.api import (
+    Arrival,
+    RealtimeUnavailable,
+    RouteInfo,
+    Stop,
+)
 from custom_components.israel_transit.const import (
     CONF_STOP_CODE,
     CONF_STOP_NAME,
@@ -130,6 +135,21 @@ def mock_curlbus() -> Generator[AsyncMock]:
     ) as factory:
         client = factory.return_value
         client.arrivals = AsyncMock(return_value=(STOP, [make_arrival(3)]))
+        yield client
+
+
+@pytest.fixture(autouse=True)
+def mock_open_bus() -> Generator[AsyncMock]:
+    """תמונת הסדנא, בלי רשת. כברירת מחדל לא זמינה, כמו כשאין ממנה כלום."""
+    with patch(
+        "custom_components.israel_transit.coordinator.OpenBusClient", autospec=True
+    ) as factory:
+        client = factory.return_value
+        client.async_snapshot = AsyncMock(
+            side_effect=RealtimeUnavailable("open-bus is not used in this test")
+        )
+        client.snapshot = None
+        client.last_error = None
         yield client
 
 

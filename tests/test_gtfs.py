@@ -19,6 +19,8 @@ from conftest import PACKAGE
 gtfs = importlib.import_module(f"{PACKAGE}.gtfs")
 
 IL = timezone(timedelta(hours=3))
+# שמות העמודות במפורש, כך ש-seq החדשה נשארת NULL בשורות הבדיקה.
+_DEP_COLS = "(stop_code, route_id, service_id, arrival_sec, trip_idx)"
 
 
 # --- line decoding ----------------------------------------------------------
@@ -226,7 +228,7 @@ def index() -> sqlite3.Connection:
         ],
     )
     connection.executemany(
-        "INSERT INTO departures VALUES (?,?,?,?,?)",
+        f"INSERT INTO departures {_DEP_COLS} VALUES (?,?,?,?,?)",
         [
             (35962, 34447, 1, 12 * 3600, 1),  # 12:00 on a weekday
             (35962, 34447, 1, 12 * 3600 + 600, 2),  # 12:10
@@ -235,7 +237,7 @@ def index() -> sqlite3.Connection:
         ],
     )
     connection.executemany(
-        "INSERT INTO trips VALUES (?,?,?)",
+        "INSERT INTO trips (trip_idx, origin_sec, dest_code) VALUES (?,?,?)",
         [(1, 11 * 3600 + 40 * 60, 36307), (4, 24 * 3600 + 30 * 60, 21023)],
     )
     return connection
@@ -326,7 +328,9 @@ def test_an_unknown_stop_returns_nothing(index):
 
 
 def test_results_are_sorted_across_both_service_days(index):
-    index.execute("INSERT INTO departures VALUES (35962,34447,1,?,9)", (26 * 3600,))
+    index.execute(
+        f"INSERT INTO departures {_DEP_COLS} VALUES (35962,34447,1,?,9)", (26 * 3600,)
+    )
     rows = _window(index, datetime(2026, 8, 31, 0, 30, tzinfo=IL), hours=3)
     assert [row.when for row in rows] == sorted(row.when for row in rows)
 
@@ -340,7 +344,9 @@ def test_the_window_reaches_back_for_a_late_trip(index):
 
 def test_a_trip_just_after_midnight_on_the_next_service_day_is_found(index):
     """בפורמט הישן נסיעה של 00:30 שייכת ליום השירות של מחר."""
-    index.execute("INSERT INTO departures VALUES (35962,34447,1,?,9)", (30 * 60,))
+    index.execute(
+        f"INSERT INTO departures {_DEP_COLS} VALUES (35962,34447,1,?,9)", (30 * 60,)
+    )
     # 2026-08-30 is a Sunday; 23:00 Sunday looks ahead into Monday's 00:30.
     rows = _window(index, datetime(2026, 8, 30, 23, 0, tzinfo=IL), hours=2)
     assert [row.when.strftime("%Y-%m-%d %H:%M") for row in rows] == [
@@ -387,7 +393,7 @@ def test_a_feed_with_only_calendar_dates_is_read():
     connection.execute("INSERT INTO calendar_dates VALUES (20260830, 20260830, 1)")
     # 27:30 של יום השירות שמתחיל ב-04:00: 03:30 בבוקר שלמחרת.
     connection.execute(
-        "INSERT INTO departures VALUES (35962, 34446, 20260830, ?, 1)",
+        f"INSERT INTO departures {_DEP_COLS} VALUES (35962, 34446, 20260830, ?, 1)",
         (27 * 3600 + 1800,),
     )
     rows = gtfs.departures_at(
@@ -416,7 +422,9 @@ def test_the_service_day_starts_at_noon_minus_twelve_hours():
 
 def test_a_morning_time_on_the_spring_change_is_wall_clock_correct(index):
     index.execute("INSERT INTO calendar_dates VALUES (1, 20260327, 1)")
-    index.execute("INSERT INTO departures VALUES (35962,34447,1,?,9)", (8 * 3600,))
+    index.execute(
+        f"INSERT INTO departures {_DEP_COLS} VALUES (35962,34447,1,?,9)", (8 * 3600,)
+    )
     start = datetime(2026, 3, 27, 7, 30, tzinfo=JERUSALEM)
     rows = gtfs.departures_at(index, 35962, start, start + timedelta(hours=1))
     assert [row.when.strftime("%H:%M %z") for row in rows] == ["08:00 +0300"]
@@ -426,7 +434,7 @@ def test_the_repeated_hour_on_the_autumn_change_resolves_by_offset(index):
     """ב-25.10 השעה 01:00-01:59 קיימת פעמיים. GTFS סופר שניות מנקודת האפס."""
     index.execute("INSERT INTO calendar_dates VALUES (1, 20261025, 1)")
     index.executemany(
-        "INSERT INTO departures VALUES (35962,34447,1,?,9)",
+        f"INSERT INTO departures {_DEP_COLS} VALUES (35962,34447,1,?,9)",
         [(30 * 60,), (90 * 60,)],
     )
     start = datetime(2026, 10, 25, 0, 0, tzinfo=JERUSALEM)
