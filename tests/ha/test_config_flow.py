@@ -16,7 +16,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.israel_transit.api import IsraelTransitError, RouteInfo
 from custom_components.israel_transit.const import (
@@ -30,6 +29,7 @@ from custom_components.israel_transit.const import (
     SUBENTRY_TYPE_STOP,
 )
 
+from .common import MockConfigEntry
 from .conftest import DANKAL, STOP, stop_device, stop_subentry
 
 RAIL_ROUTE = RouteInfo(

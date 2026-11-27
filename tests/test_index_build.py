@@ -13,9 +13,10 @@ import importlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import gtfs_fixture
 import pytest
 from conftest import PACKAGE
-from gtfs_fixture import write_feed
+from gtfs_fixture import STOP_TIMES, TRIPS, V4_CALENDAR_DATES, V4_STOPS, write_feed
 
 gtfs = importlib.import_module(f"{PACKAGE}.gtfs")
 
@@ -149,10 +150,45 @@ def test_a_configured_stop_also_gets_its_buses_timetabled(built_with_bus_stop):
     assert 960 in {r["route_id"] for r in rows}
 
 
+def test_every_platform_of_a_terminal_gets_its_timetable(tmp_path: Path):
+    """במסוף כל רציף הוא stop_id נפרד עם אותו קוד; פעם נכנס רק אחד מהם."""
+    platform = "5,21023,ת. רכבת השלום,רציף: 2,32.07,34.79,0,,21023\n"
+    files = write_feed(
+        tmp_path,
+        {
+            "stops.txt": gtfs_fixture.STOPS + platform,
+            "stop_times.txt": STOP_TIMES.replace(
+                "bus-b,12:45:00,12:45:00,3,", "bus-b,12:45:00,12:45:00,5,"
+            ),
+        },
+    )
+    db = tmp_path / "gtfs.sqlite"
+    gtfs.build_index(files, db, frozenset({21023}), "v1")
+    connection = gtfs.connect(db)
+    try:
+        times = sorted(
+            r["arrival_sec"]
+            for r in connection.execute(
+                "SELECT arrival_sec FROM departures"
+                " WHERE stop_code = 21023 AND route_id = 960"
+            )
+        )
+    finally:
+        connection.close()
+
+    assert times == [12 * 3600 + 5 * 60, 12 * 3600 + 45 * 60]
+
+
+def _arrivals(db, code, start, hours):
+    return gtfs.scheduled_arrivals(
+        gtfs.connect(db), code, start, start + timedelta(hours=hours)
+    )
+
+
 def test_departures_are_returned_as_arrivals_the_card_understands(built):
     db, _ = built
     noon = datetime(2026, 8, 30, 11, 30, tzinfo=IL)  # a Sunday
-    arrivals = gtfs.scheduled_arrivals(gtfs.connect(db), 35962, noon, hours=2)
+    arrivals = _arrivals(db, 35962, noon, 2)
 
     assert [a.eta.strftime("%H:%M") for a in arrivals] == ["12:00", "12:30"]
     first = arrivals[0]
@@ -161,13 +197,17 @@ def test_departures_are_returned_as_arrivals_the_card_understands(built):
     assert first.route_type == "0"
     assert first.operator == "תבל"
     assert first.destination == "בת ים הקוממיות"
+    # The timetable is its own schedule, and knows where the trip set out from.
+    assert first.scheduled == first.eta
+    assert first.origin.strftime("%H:%M") == "12:00"
+    assert first.dest_code == 21023
+    assert first.operator_id == "25"
 
 
 def test_a_trip_past_midnight_belongs_to_the_previous_service_day(built):
     """tram-c leaves at 25:10, which is 01:10 the next morning."""
     db, _ = built
-    after_midnight = datetime(2026, 8, 31, 1, 0, tzinfo=IL)
-    arrivals = gtfs.scheduled_arrivals(gtfs.connect(db), 36307, after_midnight, hours=1)
+    arrivals = _arrivals(db, 36307, datetime(2026, 8, 31, 1, 0, tzinfo=IL), 1)
 
     assert len(arrivals) == 1
     assert arrivals[0].eta.strftime("%Y-%m-%d %H:%M") == "2026-08-31 01:10"
@@ -176,8 +216,141 @@ def test_a_trip_past_midnight_belongs_to_the_previous_service_day(built):
 def test_nothing_runs_on_a_day_the_calendar_excludes(built):
     """Service 1 is Sunday to Thursday, so Saturday is empty."""
     db, _ = built
-    saturday = datetime(2026, 9, 5, 11, 30, tzinfo=IL)
-    assert gtfs.scheduled_arrivals(gtfs.connect(db), 35962, saturday, hours=3) == []
+    assert _arrivals(db, 35962, datetime(2026, 9, 5, 11, 30, tzinfo=IL), 3) == []
+
+
+def test_every_line_at_a_stop_is_listed_even_if_its_sample_trip_skips_it(
+    tmp_path: Path,
+):
+    """נסיעת הדוגמה של קו מדלגת על התחנה, אבל נסיעה אחרת שלו עוצרת בה."""
+    # tram-a, the sample trip of 34447, now ends before 21023; tram-b runs on
+    # to it. Only the timetable knows, so the list has to come from there too.
+    stop_times = STOP_TIMES.replace("tram-a,12:22:00,12:22:00,3,3,1,0\n", "").replace(
+        "tram-b,12:38:00,12:38:00,2,2,0,0\n",
+        "tram-b,12:38:00,12:38:00,2,2,0,0\ntram-b,12:52:00,12:52:00,3,3,1,0\n",
+    )
+    files = write_feed(tmp_path, {"stop_times.txt": stop_times})
+    db = tmp_path / "gtfs.sqlite"
+    stats = gtfs.build_index(files, db, frozenset(), "v1")
+
+    assert stats["origin_violations"] == 0
+    assert gtfs.route_stops(gtfs.connect(db), 34447)[-1].stop.code == 36307
+    routes = gtfs.routes_at_stop(gtfs.connect(db), 21023)
+    assert 34447 in {r.route_id for r in routes}
+
+
+# --- trip origin and destination --------------------------------------------
+
+
+def _trips(db):
+    connection = gtfs.connect(db)
+    return {
+        row["trip_idx"]: (row["origin_sec"], row["dest_code"])
+        for row in connection.execute("SELECT * FROM trips")
+    }
+
+
+def test_each_kept_trip_records_where_it_set_out_and_ended(built):
+    db, stats = built
+    trips = _trips(db)
+    # tram-a, tram-b, tram-c are timetabled; the buses are not kept.
+    assert sorted(trips.values()) == [
+        (12 * 3600, 21023),
+        (12 * 3600 + 1800, 36307),
+        (25 * 3600 + 600, 35962),
+    ]
+    assert stats["origin_violations"] == 0
+
+
+def test_a_trip_out_of_stop_order_gets_no_origin(tmp_path: Path):
+    """בלוק שה-stop_sequence בו לא עולה לא יכול להעיד על המוצא שלו."""
+    shuffled = STOP_TIMES.replace(
+        "tram-a,12:00:00,12:00:00,1,1,0,1\ntram-a,12:08:00,12:08:00,2,2,0,0\n",
+        "tram-a,12:08:00,12:08:00,2,2,0,0\ntram-a,12:00:00,12:00:00,1,1,0,1\n",
+    )
+    files = write_feed(tmp_path, {"stop_times.txt": shuffled})
+    db = tmp_path / "gtfs.sqlite"
+    stats = gtfs.build_index(files, db, frozenset(), "v1")
+
+    assert stats["origin_violations"] == 1
+    assert (None, None) in _trips(db).values()
+    # The rows themselves still make it into the timetable.
+    noon = datetime(2026, 8, 30, 11, 30, tzinfo=IL)
+    assert next(a.origin for a in _arrivals(db, 36307, noon, 2)) is None
+
+
+def test_the_build_records_its_coverage_and_latest_time(built):
+    connection = gtfs.connect(built[0])
+    assert gtfs.stored_coverage_end(connection).isoformat() == "2026-12-31"
+    assert gtfs.stored_max_sec(connection) == 25 * 3600 + 1200
+
+
+# --- the Ministry's v4 format -----------------------------------------------
+
+V4_TRIPS = TRIPS.replace(",1,tram-", ",20260830,tram-").replace(
+    ",1,bus-", ",20260830,bus-"
+)
+# עמודה נוספת באמצע, כמו בפורמט החדש: המיקומים נקראים מהכותרת.
+V4_STOP_TIMES = (
+    "\n".join(
+        [
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence,stop_headsign,"
+            "pickup_type,drop_off_type"
+        ]
+        + [
+            ",".join([*row.split(",")[:5], "", *row.split(",")[5:]])
+            for row in STOP_TIMES.strip().splitlines()[1:]
+        ]
+    )
+    + "\n"
+)
+
+
+@pytest.fixture
+def built_v4(tmp_path: Path):
+    files = write_feed(
+        tmp_path,
+        {
+            "calendar.txt": None,
+            "calendar_dates.txt": V4_CALENDAR_DATES,
+            "stops.txt": V4_STOPS,
+            "trips.txt": V4_TRIPS,
+            "stop_times.txt": V4_STOP_TIMES,
+        },
+    )
+    db = tmp_path / "gtfs.sqlite"
+    return db, gtfs.build_index(files, db, frozenset(), "v4")
+
+
+def test_a_v4_feed_builds_from_calendar_dates_alone(built_v4):
+    db, stats = built_v4
+    assert stats["calendar"] == 0
+    assert stats["calendar_dates"] == 2
+    noon = datetime(2026, 8, 30, 11, 30, tzinfo=IL)
+    assert [a.eta.strftime("%H:%M") for a in _arrivals(db, 35962, noon, 2)] == [
+        "12:00",
+        "12:30",
+    ]
+    # Service 20260830 does not run on the 31st.
+    monday = datetime(2026, 8, 31, 11, 30, tzinfo=IL)
+    assert _arrivals(db, 35962, monday, 2) == []
+
+
+def test_a_v4_feed_keeps_city_and_street_from_english_labels(built_v4):
+    stop = gtfs.get_stop(gtfs.connect(built_v4[0]), 35962)
+    assert (stop.city, stop.street) == ("בת ים", "אנה פרנק")
+
+
+def test_a_v4_feed_records_coverage_from_its_exceptions(built_v4):
+    assert gtfs.stored_coverage_end(gtfs.connect(built_v4[0])).isoformat() == (
+        "2026-08-31"
+    )
+
+
+def test_a_feed_without_any_calendar_is_an_error(tmp_path: Path):
+    files = write_feed(tmp_path, {"calendar.txt": None})
+    with pytest.raises(gtfs.GtfsError):
+        gtfs.build_index(files, tmp_path / "gtfs.sqlite", frozenset(), "v1")
 
 
 # --- search -----------------------------------------------------------------

@@ -7,3 +7,5 @@ __pycache__/
 .coverage
 htmlcov/
 israel_transit_logo.jpg
+# תיקיית ההגדרות ש-pytest-homeassistant נותן ל-HA בזמן הבדיקות
+tests/testing_config/

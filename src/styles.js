@@ -393,6 +393,23 @@ export const cardStyles = css`
     color: var(--it-text-warning);
   }
 
+  .delay.early,
+  .delay.on-time {
+    color: var(--it-text-success);
+  }
+
+  /* נסיעה שבוטלה נשארת בלוח, מחוקה, כדי שלא יחכו לה. */
+  .row.cancelled .destination,
+  .row.cancelled .eta-main {
+    text-decoration: line-through;
+    color: var(--secondary-text-color);
+  }
+
+  .cancelled-tag {
+    font-weight: var(--ha-font-weight-medium, 500);
+    color: var(--ha-color-on-danger-normal, #b30532);
+  }
+
   .chevron {
     color: var(--secondary-text-color);
     margin-inline-start: calc(-1 * var(--ha-space-1, 4px));

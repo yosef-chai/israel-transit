@@ -2,11 +2,13 @@
 
 :func:`async_fetch_stop` holds the whole merge policy -- real-time first, the
 local timetable for what SIRI does not carry -- so the polling coordinator and
-the card's WebSocket command cannot drift apart.
+the card's WebSocket command cannot drift apart. The policy itself, which needs
+no Home Assistant, is in :mod:`.merge`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -15,7 +17,6 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
@@ -29,7 +30,6 @@ from .api import (
     RailClient,
     RouteInfo,
     Stop,
-    line_sort_key,
 )
 from .const import (
     CONF_RAIL_DESTINATION,
@@ -38,16 +38,12 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEPARTED_GRACE,
     DOMAIN,
-    ISSUE_REALTIME_UNAVAILABLE,
-    MAX_ARRIVALS,
     NEW_STOP_INDEX_DELAY,
-    RAIL_MATCH_WINDOW,
-    REALTIME_OUTAGE_ISSUE_AFTER,
-    REALTIME_ROUTE_TYPES,
     ROUTE_TYPE_RAIL,
     TIMETABLE_REQUEST_COOLDOWN,
 )
 from .index import GtfsIndex
+from .merge import merge_board
 from .stop_registry import StopRegistry
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,6 +70,8 @@ class StopData:
     routes: list[RouteInfo] = field(default_factory=list)
     has_realtime: bool = False
     realtime_error: str | None = None
+    # מתי הלוח נשלף, ב-UTC. לוח ישן מוגש לפעמים בכוונה, ואז זה מה שמסגיר אותו.
+    updated_at: datetime = field(default_factory=dt_util.utcnow)
 
     def upcoming(self, now: datetime | None = None) -> list[Arrival]:
         """The arrivals that have not left yet.
@@ -95,6 +93,7 @@ class StopData:
             "routes": [r.as_dict() for r in self.routes],
             "has_realtime": self.has_realtime,
             "realtime_error": self.realtime_error,
+            "updated_at": self.updated_at.isoformat(),
         }
 
 
@@ -116,10 +115,6 @@ class Clients:
         # monotonic() מתחיל סמוך לאתחול המכונה, ולכן 0 היה חוסם את הבקשה הראשונה
         # בחצי השעה הראשונה אחרי הפעלה.
         self._last_timetable_request = -TIMETABLE_REQUEST_COOLDOWN
-        # תחנה -> מתי היה לה זמן אמת לאחרונה. נמדד מההפעלה: תקלה שהתחילה לפניה
-        # אינה ידועה, ואין סיבה לפתוח עליה תקלה ברגע הראשון.
-        self._started = monotonic()
-        self._realtime_ok_at: dict[int, float] = {}
 
     @callback
     def async_note_stop(self, stop_code: int) -> None:
@@ -185,43 +180,8 @@ class Clients:
             raise IsraelTransitError(self.index.last_error)
 
     @callback
-    def async_note_realtime(self, stop_code: int, data: StopData) -> None:
-        """Raise, or clear, the repair issue for a real-time outage.
-
-        One stop without real-time is that stop; every bus stop without it for
-        half an hour is the service being down, and the user should hear that
-        the board is a timetable for now. Stops served only by modes SIRI does
-        not carry never count either way.
-        """
-        if not any(r.route_type in REALTIME_ROUTE_TYPES for r in data.routes):
-            return
-        now = monotonic()
-        if data.realtime_error is None:
-            self._realtime_ok_at[stop_code] = now
-            ir.async_delete_issue(self.hass, DOMAIN, ISSUE_REALTIME_UNAVAILABLE)
-            return
-        self._realtime_ok_at.setdefault(stop_code, self._started)
-        watched = [
-            code
-            for code in async_configured_stop_codes(self.hass)
-            if code in self._realtime_ok_at
-        ]
-        if watched and all(
-            now - self._realtime_ok_at[code] >= REALTIME_OUTAGE_ISSUE_AFTER
-            for code in watched
-        ):
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                ISSUE_REALTIME_UNAVAILABLE,
-                is_fixable=False,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key=ISSUE_REALTIME_UNAVAILABLE,
-                translation_placeholders={"error": data.realtime_error},
-            )
-
-    @callback
     def async_cancel_pending(self) -> None:
+        self.index.async_cancel_retry()
         if self._pending_index is not None:
             self._pending_index()
             self._pending_index = None
@@ -276,29 +236,36 @@ async def async_fetch_stop(
     except IsraelTransitError as err:
         _LOGGER.debug("GTFS index lookup failed for stop %s: %s", stop_code, err)
 
-    realtime: list[Arrival] = []
-    realtime_error: str | None = None
-    try:
-        curlbus_stop, realtime = await clients.curlbus.arrivals(stop_code)
-        # Identity comes from GTFS first: curlbus does not know the newer stops
-        # at all and answers with an error for them.
-        stop = stop or curlbus_stop
-    except IsraelTransitError as err:
-        realtime_error = str(err)
-        _LOGGER.debug("No real-time for stop %s: %s", stop_code, err)
-
+    # שני המקורות במקביל, כך ש-rail.co.il איטי לא מעכב את הלוח. כל אחד בולע
+    # רק את השגיאות הצפויות שלו, ולכן ביטול משימה (כיבוי HA) עובר כרגיל.
+    async with asyncio.TaskGroup() as group:
+        live_task = group.create_task(_async_live(clients, stop_code))
+        rail_task = (
+            group.create_task(_async_rail(clients, stop, routes, rail_destination))
+            if stop is not None
+            else None
+        )
+    curlbus_stop, realtime, realtime_error = live_task.result()
+    # Identity comes from GTFS first: curlbus does not know the newer stops
+    # at all and answers with an error for them.
+    stop = stop or curlbus_stop
     if stop is None:
         raise IsraelTransitError(f"Stop {stop_code} is not in the GTFS feed")
+    rail = (
+        rail_task.result()
+        if rail_task is not None
+        else await _async_rail(clients, stop, routes, rail_destination)
+    )
 
-    _enrich(realtime, routes)
-    scheduled = await _async_scheduled(clients, stop_code, routes, bool(realtime_error))
-    rail = await _async_rail(clients, stop, routes, rail_destination)
-    arrivals = [*realtime, *_without_live_trains(scheduled, rail), *rail]
-    arrivals.sort(key=lambda a: (a.eta, line_sort_key(a.line_name)))
+    try:
+        scheduled = await clients.index.async_departures(stop_code)
+    except IsraelTransitError as err:
+        _LOGGER.debug("No timetable for stop %s: %s", stop_code, err)
+        scheduled = []
 
     return StopData(
         stop=stop,
-        arrivals=arrivals[:MAX_ARRIVALS],
+        arrivals=merge_board(realtime, scheduled, rail, routes, dt_util.utcnow()),
         routes=routes,
         # An empty answer is still a real-time answer: nothing is due.
         has_realtime=realtime_error is None,
@@ -306,77 +273,16 @@ async def async_fetch_stop(
     )
 
 
-def _without_live_trains(
-    scheduled: list[Arrival], rail: list[Arrival]
-) -> list[Arrival]:
-    """Drop the timetabled trains that rail.co.il reported live.
-
-    rail.co.il only answers for the destination asked about, so only the trains
-    it actually returned are replaced. Every other train -- to other
-    destinations, or missing from a partial answer -- stays on the timetable.
-    The two sources share no trip id, so a train is matched on its timetabled
-    departure: the live time less the delay.
-    """
-    if not rail:
-        return scheduled
-    live = [a.eta - timedelta(minutes=a.delay_minutes or 0) for a in rail]
-    return [
-        a
-        for a in scheduled
-        if a.route_type != ROUTE_TYPE_RAIL
-        or not any(abs(a.eta - when) <= RAIL_MATCH_WINDOW for when in live)
-    ]
-
-
-def _enrich(arrivals: list[Arrival], routes: list[RouteInfo]) -> None:
-    """Fill in what SIRI leaves out, from the route the arrival belongs to.
-
-    curlbus reports a line id but not its mode, so without this every live bus
-    would render in the card's "unknown mode" colour instead of the bus one.
-    The GTFS route_id and the curlbus line_id are the same number, which is what
-    makes the join possible.
-    """
-    by_line = {route.line_ref: route for route in routes}
-    for arrival in arrivals:
-        route = by_line.get(arrival.line_ref or "")
-        if route is None:
-            continue
-        if arrival.route_type is None:
-            arrival.route_type = route.route_type
-        if not arrival.destination:
-            arrival.destination = route.destination
-        if not arrival.operator:
-            arrival.operator = route.agency
-
-
-async def _async_scheduled(
-    clients: Clients,
-    stop_code: int,
-    routes: list[RouteInfo],
-    realtime_failed: bool,
-) -> list[Arrival]:
-    """Timetable rows for the modes SIRI does not carry.
-
-    Light rail, cable tram and rail publish nothing to SIRI, so their lines are
-    always filled from the index. If curlbus itself failed, every line the index
-    knows about is filled instead, so the card degrades to a timetable rather
-    than to an empty box.
-    """
-    wanted = {
-        route.line_ref
-        for route in routes
-        if realtime_failed or route.route_type not in REALTIME_ROUTE_TYPES
-    }
-    if not wanted and not realtime_failed:
-        return []
+async def _async_live(
+    clients: Clients, stop_code: int
+) -> tuple[Stop | None, list[Arrival], str | None]:
+    """curlbus, או השגיאה שלו כטקסט. לא זורק על כשל של המקור עצמו."""
     try:
-        scheduled = await clients.index.async_departures(stop_code)
+        curlbus_stop, realtime = await clients.curlbus.arrivals(stop_code)
     except IsraelTransitError as err:
-        _LOGGER.debug("No timetable for stop %s: %s", stop_code, err)
-        return []
-    if not routes:  # unknown line mix -- show everything the index has
-        return scheduled
-    return [a for a in scheduled if a.line_ref in wanted]
+        _LOGGER.debug("No real-time for stop %s: %s", stop_code, err)
+        return None, [], str(err)
+    return curlbus_stop, realtime, None
 
 
 async def _async_rail(
@@ -470,7 +376,6 @@ class IsraelTransitCoordinator(DataUpdateCoordinator[StopData]):
             ) from err
 
         self._async_log_realtime(data)
-        self.clients.async_note_realtime(self.stop_code, data)
         return data
 
     @callback

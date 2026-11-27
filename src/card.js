@@ -6,8 +6,10 @@ import { clockOffset } from "./map-geometry.js";
 import { cardStyles, sharedStyles } from "./styles.js";
 import {
   DOMAIN,
+  dataAgeMinutes,
   errorMessage,
   formatClock,
+  formatDelay,
   isDark,
   minutesUntil,
   modeColor,
@@ -23,6 +25,8 @@ const TICK_MS = 10000;
 // A vehicle stays on the board this long past its time, the same grace the
 // backend gives: "now" is often still pulling in. After that it has left.
 const DEPARTED_MS = 60000;
+// לוח שלא התעדכן יותר מזה מקבל תווית גיל: השרת מרענן כל דקה כברירת מחדל.
+const OLD_DATA_MINUTES = 2;
 // Heights in styles.js (cardStyles): the header with its city and code line,
 // one arrival row, and the padding under the list. Sizing follows them.
 const HEADER_PX = 72;
@@ -206,6 +210,10 @@ export class IsraelTransitCard extends LitElement {
   async _refresh() {
     if (!this.hass || !this._config?.stop_code) return;
     const asked = Number(this._config.stop_code);
+    // תשובה ישנה שמגיעה אחרי חדשה (חיבור חוזר, נראות, טיימר) לא דורסת אותה.
+    const request = (this._request = (this._request ?? 0) + 1);
+    const superseded = () =>
+      request !== this._request || asked !== Number(this._config?.stop_code);
     try {
       const data = await this.hass.callWS({
         type: `${DOMAIN}/stop`,
@@ -216,7 +224,7 @@ export class IsraelTransitCard extends LitElement {
       // stop's request is still in flight. Without this the slower answer wins
       // and the card goes on showing the stop the user just replaced, which
       // looks exactly like the change having been ignored.
-      if (asked !== Number(this._config?.stop_code)) return;
+      if (superseded()) return;
       // Positions are aged on the server's clock, so a phone whose clock is
       // off still knows how old one is.
       this._clockOffset = clockOffset(data.server_time, Date.now());
@@ -224,10 +232,12 @@ export class IsraelTransitCard extends LitElement {
       this._error = null;
       this._followVehicle();
     } catch (err) {
-      if (asked !== Number(this._config?.stop_code)) return;
+      if (superseded()) return;
       // The last good board stays up: one failed poll -- a restart, a dropped
       // connection -- says nothing about the buses already on it.
       this._error = errorMessage(this.hass, err);
+      // בנייה ראשונה של לוח הזמנים היא המתנה, לא תקלה.
+      this._waiting = (err?.code ?? err?.error?.code) === "index_building";
     }
   }
 
@@ -302,7 +312,18 @@ export class IsraelTransitCard extends LitElement {
     // _tick is read so departed rows drop off, and countdowns move, on time.
     void this._tick;
     const arrivals = this._data ? this._arrivals : [];
-    const stale = Boolean(this._error && this._data);
+    const offline = Boolean(this._error && this._data);
+    const age = this._data
+      ? dataAgeMinutes(this._data.updated_at, this._clockOffset ?? 0)
+      : null;
+    const old = age !== null && age > OLD_DATA_MINUTES;
+    const stale = offline || old;
+    const warning = [
+      offline ? this._t("staleData") : "",
+      old ? localize(this.hass, "dataAge", { n: age }) : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
 
     return html`
       <ha-card>
@@ -310,10 +331,16 @@ export class IsraelTransitCard extends LitElement {
         ${stale
           ? html`<div class="notice">
               <div class="alert warning" role="status">
-                ${icon(ICONS.offline, { size: 18 })}<span>${this._t("staleData")}</span>
+                ${icon(ICONS.offline, { size: 18 })}<span>${warning}</span>
               </div>
             </div>`
-          : nothing}
+          : arrivals.length && this._timetableOnly()
+            ? html`<div class="notice">
+                <div class="alert info" role="status">
+                  ${icon(ICONS.timetable, { size: 18 })}<span>${this._t("timetableOnly")}</span>
+                </div>
+              </div>`
+            : nothing}
         <div
           class="rows ${stale ? "stale" : ""}"
           aria-busy=${!this._data && !this._error ? "true" : "false"}
@@ -321,8 +348,13 @@ export class IsraelTransitCard extends LitElement {
           ${!this._data
             ? this._error
               ? html`<div class="notice">
-                  <div class="alert error" role="alert">
-                    ${icon(ICONS.alert, { size: 18 })}<span>${this._error}</span>
+                  <div
+                    class="alert ${this._waiting ? "info" : "error"}"
+                    role=${this._waiting ? "status" : "alert"}
+                  >
+                    ${icon(this._waiting ? ICONS.timetable : ICONS.alert, { size: 18 })}<span
+                      >${this._error}</span
+                    >
                   </div>
                 </div>`
               : this._renderSkeleton()
@@ -368,8 +400,15 @@ export class IsraelTransitCard extends LitElement {
     if (this._data.realtime_error && !this._data.routes?.length) {
       return this._t("noData");
     }
-    if (this._data.realtime_error) return this._t("noRealtime");
+    if (this._timetableOnly()) return this._t("noRealtime");
     return this._t("noArrivals");
+  }
+
+  /** זמן אמת נפל, ובתחנה יש קו שבדרך כלל משדר אותו. */
+  _timetableOnly() {
+    return Boolean(
+      this._data?.realtime_error && this._data.routes?.some((route) => route.has_realtime),
+    );
   }
 
   _renderHeader(stop) {
@@ -418,17 +457,30 @@ export class IsraelTransitCard extends LitElement {
       : minutes === 0
         ? this._t("now")
         : `${minutes} ${this._t("minutesLong")}`;
+    const delay = formatDelay(arrival.delay_minutes);
+    const delayText =
+      delay === null || config.show_delay === false
+        ? ""
+        : delay === 0
+          ? this._t("onTime")
+          : `${Math.abs(arrival.delay_minutes)} ${this._t(
+              arrival.delay_minutes > 0 ? "delayMinutes" : "earlyMinutes",
+            )}`;
 
     return html`
       <button
-        class="row"
+        class="row ${arrival.cancelled ? "cancelled" : ""}"
         @click=${(ev) => this._open("_routeDialog", arrival, ev)}
         aria-label=${[
           `${modeLabel(this.hass, arrival.route_type) || this._t("lineDetails")} ${arrival.line_name}`,
           destination,
+          arrival.cancelled ? this._t("cancelled") : "",
           when,
+          delayText,
           arrival.is_realtime ? this._t("live") : this._t("scheduled"),
-        ].join(", ")}
+        ]
+          .filter(Boolean)
+          .join(", ")}
       >
         ${config.show_mode_icon
           ? icon(modePath(arrival.route_type), { cls: "icon mode" })
@@ -464,12 +516,18 @@ export class IsraelTransitCard extends LitElement {
   /** Under the minutes: live or not, the clock, the delay. */
   _renderEtaExtra(arrival, asClock, clock) {
     const config = this._config;
+    const delay = formatDelay(arrival.delay_minutes);
     const parts = [
       arrival.is_realtime ? icon(ICONS.live, { size: 12, cls: "icon live" }) : nothing,
       config.show_clock && !asClock ? html`<span class="ltr">${clock}</span>` : nothing,
-      config.show_delay !== false && arrival.delay_minutes
-        ? html`<span class="delay ltr">+${arrival.delay_minutes}</span>`
-        : nothing,
+      // 0 הוא "בזמן" שנמדד, לא חוסר מידע; null לא מוצג בכלל.
+      config.show_delay === false || delay === null
+        ? nothing
+        : delay === 0
+          ? html`<span class="delay on-time">${this._t("onTime")}</span>`
+          : html`<span class="delay ltr ${arrival.delay_minutes < 0 ? "early" : ""}"
+              >${delay}</span
+            >`,
     ].filter((part) => part !== nothing);
     return parts.length ? html`<div class="eta-extra">${parts}</div>` : nothing;
   }
@@ -478,8 +536,14 @@ export class IsraelTransitCard extends LitElement {
   _renderSub(arrival) {
     const config = this._config;
     const parts = [
+      arrival.cancelled
+        ? html`<span class="tag cancelled-tag">${this._t("cancelled")}</span>`
+        : nothing,
       config.show_operator !== false && arrival.operator
         ? html`<span class="operator">${arrival.operator}</span>`
+        : nothing,
+      arrival.train_number
+        ? html`<span>${this._t("train")} <span class="ltr">${arrival.train_number}</span></span>`
         : nothing,
       // Only the timetabled rows carry a tag. A live arrival is the normal
       // case, so labelling every one of them said nothing while crowding out

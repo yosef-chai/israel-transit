@@ -646,7 +646,7 @@ export class IsraelTransitRouteDialog extends DialogBase {
   /** Minutes into the run, for when no vehicle departure time is known. */
   _relative(seconds) {
     if (seconds == null) return "";
-    const minutes = Math.round(seconds / 60);
+    const minutes = Math.floor(seconds / 60);
     return minutes ? `+${minutes} ${this._t("minutes")}` : "";
   }
 
@@ -690,7 +690,9 @@ export class IsraelTransitRouteDialog extends DialogBase {
   /** Where the vehicle is, and what that means for the rider. */
   _renderStatus(arrival, stops, { here, mine, age, stale, vehicle }) {
     let headline;
-    if (vehicle && here >= 0) {
+    if (arrival.cancelled) {
+      headline = this._t("cancelled");
+    } else if (vehicle && here >= 0) {
       headline = here === mine ? this._t("atYourStop") : this._t("nearStop", { stop: stops[here].name });
     } else if (vehicle) {
       headline = this._t("awayFromRoute");

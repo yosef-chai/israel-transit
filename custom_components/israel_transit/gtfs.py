@@ -38,14 +38,15 @@ import zlib
 from array import array
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Final
 
 import aiohttp
 
 from .api import (
+    ISRAEL_TZ,
     Arrival,
     IsraelTransitError,
     RouteInfo,
@@ -63,21 +64,34 @@ MEMBERS: Final = (
     "routes.txt",
     "trips.txt",
     "stops.txt",
-    "calendar.txt",
     "stop_times.txt",
 )
 
+# הפורמט הישן מפרסם calendar.txt, והחדש (מסמך המפתחים v4) רק calendar_dates.txt.
+# לפחות אחד מהם חובה.
+CALENDAR_MEMBERS: Final = ("calendar.txt", "calendar_dates.txt")
+
 # Read when the feed has them; a feed without them still builds.
-OPTIONAL_MEMBERS: Final = ("shapes.txt",)
+OPTIONAL_MEMBERS: Final = (*CALENDAR_MEMBERS, "shapes.txt")
 
 # Douglas-Peucker tolerance, in metres. Below what a card map can show.
 _SHAPE_TOLERANCE_M: Final = 3.0
 # Metres per microdegree of latitude.
 _M_PER_MICRODEG: Final = 0.111_32
 
-# stop_desc looks like "רחוב: בן יהודה 74 עיר: כפר סבא רציף:  קומה: "
-_CITY_RE: Final = re.compile(r"עיר:\s*(.*?)\s*(?:רציף:|קומה:|$)")
-_STREET_RE: Final = re.compile(r"רחוב:\s*(.*?)\s*(?:עיר:|רציף:|קומה:|$)")
+# stop_desc בפורמט הישן: "רחוב: בן יהודה 74 עיר: כפר סבא רציף:  קומה: ",
+# ובחדש אותן תוויות באנגלית: "Street: … City: … Platform:  Floor:".
+_CITY_RE: Final = re.compile(
+    r"(?:עיר|City):\s*(.*?)\s*(?:רציף:|קומה:|Platform:|Floor:|$)"
+)
+_STREET_RE: Final = re.compile(
+    r"(?:רחוב|Street):\s*(.*?)\s*(?:עיר:|רציף:|קומה:|City:|Platform:|Floor:|$)"
+)
+
+# שורות stop_times שנכתבות ל-SQLite בכל פעם, כדי שהבנייה לא תחזיק את כולן בזיכרון.
+_BATCH_ROWS: Final = 50_000
+# גג לשניות של יום שירות כשהאינדקס לא רשם אחד (GTFS מתיר זמנים מעבר ל-24:00).
+_DEFAULT_MAX_SEC: Final = 48 * 3600
 
 _ZIP64_MARK: Final = 0xFFFFFFFF
 
@@ -87,9 +101,10 @@ _MAX_SEARCH_WORDS: Final = 4
 # Bumped whenever the tables below change shape. An index built by an older
 # version stays in use while its replacement is built, as long as it has every
 # column the queries read; one older than that is discarded.
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 # The oldest schema the current queries can still read: one that has every
-# column they select. route_shape copes with the missing shapes table itself.
+# column they select. route_shape and routes_at_stop cope with the tables an
+# older index lacks; departures_at fails on one, and callers already degrade.
 MIN_READABLE_SCHEMA: Final = 2
 
 _SCHEMA: Final = """
@@ -99,7 +114,7 @@ CREATE TABLE stops (
 );
 CREATE TABLE routes (
     route_id INTEGER PRIMARY KEY, short_name TEXT, long_name TEXT,
-    agency TEXT, route_type TEXT, headsign TEXT, shape_id TEXT
+    agency TEXT, route_type TEXT, headsign TEXT, shape_id TEXT, agency_id TEXT
 );
 CREATE TABLE patterns (
     route_id INTEGER NOT NULL, seq INTEGER NOT NULL,
@@ -107,12 +122,24 @@ CREATE TABLE patterns (
 );
 CREATE TABLE departures (
     stop_code INTEGER NOT NULL, route_id INTEGER NOT NULL,
-    service_id INTEGER NOT NULL, arrival_sec INTEGER NOT NULL
+    service_id INTEGER NOT NULL, arrival_sec INTEGER NOT NULL,
+    trip_idx INTEGER NOT NULL
+);
+CREATE TABLE trips (
+    trip_idx INTEGER PRIMARY KEY, origin_sec INTEGER, dest_code INTEGER
 );
 CREATE TABLE calendar (
     service_id INTEGER PRIMARY KEY, days INTEGER NOT NULL,
     start_date INTEGER NOT NULL, end_date INTEGER NOT NULL
 );
+CREATE TABLE calendar_dates (
+    service_id INTEGER NOT NULL, date INTEGER NOT NULL,
+    exception_type INTEGER NOT NULL
+);
+CREATE TABLE stop_routes (
+    stop_code INTEGER NOT NULL, route_id INTEGER NOT NULL,
+    PRIMARY KEY (stop_code, route_id)
+) WITHOUT ROWID;
 CREATE TABLE shapes (shape_id TEXT PRIMARY KEY, points BLOB);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 """
@@ -122,6 +149,7 @@ CREATE INDEX idx_patterns_route ON patterns (route_id, seq);
 CREATE INDEX idx_patterns_stop ON patterns (stop_code);
 CREATE INDEX idx_departures_stop ON departures (stop_code, arrival_sec);
 CREATE INDEX idx_calendar_window ON calendar (start_date, end_date);
+CREATE INDEX idx_calendar_dates ON calendar_dates (date, exception_type);
 """
 
 
@@ -572,8 +600,8 @@ def stage_index(
         for row in _member_rows(files["agency.txt"])
     }
 
-    # route key (the GTFS string) -> (route_id, short, long, agency, type)
-    routes: dict[str, tuple[int, str, str, str, str]] = {}
+    # route key (the GTFS string) -> (route_id, short, long, agency, type, agency_id)
+    routes: dict[str, tuple[int, str, str, str, str, str]] = {}
     for row in _member_rows(files["routes.txt"]):
         if not (row.get("route_id") or "").isdigit():
             continue
@@ -583,6 +611,7 @@ def stage_index(
             row.get("route_long_name", ""),
             agencies.get(row.get("agency_id", ""), ""),
             row.get("route_type", ""),
+            row.get("agency_id", ""),
         )
     stats["routes"] = len(routes)
 
@@ -621,7 +650,8 @@ def stage_index(
     stats["timetable_trips"] = len(timetable_trips)
 
     stops: dict[str, _StopRow] = {}
-    stop_id_by_code: dict[int, str] = {}
+    # מסוף או תחנה מרכזית הם stop_id לכל רציף, כולם עם אותו קוד: כולם נכנסים.
+    wanted_stop_ids: set[str] = set()
     for row in _member_rows(files["stops.txt"]):
         code_text = row.get("stop_code") or ""
         if not code_text.isdigit():
@@ -636,105 +666,47 @@ def stage_index(
             _float(row.get("stop_lon")),
             _described(description, _STREET_RE),
         )
-        stop_id_by_code[code] = row["stop_id"]
+        if code in extra_stop_codes:
+            wanted_stop_ids.add(row["stop_id"])
     stats["stops"] = len(stops)
 
-    wanted_stop_ids = {
-        stop_id
-        for code in extra_stop_codes
-        if (stop_id := stop_id_by_code.get(code)) is not None
-    }
-
-    patterns: list[tuple[int, int, int, int]] = []
-    departures: list[tuple[int, int, int, int]] = []
-    # Rows at a configured stop belong to trips we know nothing about yet; their
-    # routes are resolved with a second cheap pass over trips.txt afterwards.
-    pending: list[tuple[str, int, int]] = []
-    trip_start: dict[str, int] = {}
-    scanned = 0
-
-    lines = _member_lines(files["stop_times.txt"])
-    next(lines, None)  # header
-    for line in lines:
-        scanned += 1
-        trip_id = line[: line.find(",")]
-        pattern_route = pattern_trips.get(trip_id)
-        timetable = timetable_trips.get(trip_id)
-        if pattern_route is None and timetable is None and not wanted_stop_ids:
-            continue
-
-        # trip_id,arrival_time,departure_time,stop_id,stop_sequence,...
-        fields = line.split(",", 5)
-        if len(fields) < 5:
-            continue
-        stop_id = fields[3]
-        interesting_stop = stop_id in wanted_stop_ids
-        if pattern_route is None and timetable is None and not interesting_stop:
-            continue
-        stop = stops.get(stop_id)
-        if stop is None:
-            continue
-        arrival = _seconds(fields[1])
-        if arrival is None:
-            continue
-
-        if pattern_route is not None:
-            base = trip_start.setdefault(trip_id, arrival)
-            patterns.append(
-                (routes[pattern_route][0], _int(fields[4]), stop[0], arrival - base)
+    calendar_rows = (
+        [
+            (
+                _int(row["service_id"]),
+                _day_mask(row),
+                _int(row.get("start_date")),
+                _int(row.get("end_date")),
             )
-        if timetable is not None:
-            departures.append((stop[0], routes[timetable[0]][0], timetable[1], arrival))
-        elif interesting_stop:
-            pending.append((trip_id, stop[0], arrival))
-
-    stats["stop_times_scanned"] = scanned
-
-    if pending:
-        wanted_trips = {trip_id for trip_id, _, _ in pending}
-        resolved: dict[str, tuple[int, int]] = {}
-        for row in _member_rows(files["trips.txt"]):
-            trip_id = row.get("trip_id", "")
-            if trip_id not in wanted_trips:
-                continue
-            if route := routes.get(row.get("route_id", "")):
-                resolved[trip_id] = (route[0], _int(row.get("service_id")))
-        for trip_id, stop_code, arrival in pending:
-            if (entry := resolved.get(trip_id)) is not None:
-                departures.append((stop_code, entry[0], entry[1], arrival))
-
-    stats["patterns"] = len(patterns)
-    stats["departures"] = len(departures)
-
-    # Shapes only for the routes through the indexed stops: the card draws a
-    # route from a stop's board, and every route would cost tens of MB.
-    serving = {
-        route_id for route_id, _, code, _ in patterns if code in extra_stop_codes
-    } | {route_id for code, route_id, _, _ in departures if code in extra_stop_codes}
-    wanted_shapes = {
-        shape_id for key, shape_id in route_shapes.items() if routes[key][0] in serving
-    }
-    shape_rows: list[tuple[str, bytes]] = []
-    if wanted_shapes and "shapes.txt" in files:
-        # Each shape_id once, however many routes share it.
-        for shape_id, (seqs, lats, lons) in read_shapes(
-            _member_lines(files["shapes.txt"]), wanted_shapes
-        ).items():
-            if (blob := encode_shape(seqs, lats, lons)) is not None:
-                shape_rows.append((shape_id, blob))
-    stats["shapes"] = len(shape_rows)
-
-    calendar_rows = [
-        (
-            _int(row["service_id"]),
-            _day_mask(row),
-            _int(row.get("start_date")),
-            _int(row.get("end_date")),
-        )
-        for row in _member_rows(files["calendar.txt"])
-        if (row.get("service_id") or "").isdigit()
-    ]
+            for row in _member_rows(files["calendar.txt"])
+            if (row.get("service_id") or "").isdigit()
+        ]
+        if "calendar.txt" in files
+        else []
+    )
+    exception_rows = (
+        [
+            (
+                _int(row["service_id"]),
+                _int(row.get("date")),
+                _int(row.get("exception_type")),
+            )
+            for row in _member_rows(files["calendar_dates.txt"])
+            if (row.get("service_id") or "").isdigit()
+        ]
+        if "calendar_dates.txt" in files
+        else []
+    )
+    if not calendar_rows and not exception_rows:
+        raise GtfsError("GTFS feed has no service calendar")
     stats["calendar"] = len(calendar_rows)
+    stats["calendar_dates"] = len(exception_rows)
+    # עד איזה יום יש בו שירות. חריג מסוג 2 מבטל ולכן לא מאריך את הכיסוי.
+    coverage_end = max(
+        [end for _, _, _, end in calendar_rows]
+        + [day for _, day, kind in exception_rows if kind == 1],
+        default=0,
+    )
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = staged_path(db_path)
@@ -743,11 +715,54 @@ def stage_index(
     try:
         connection.executescript("PRAGMA journal_mode=OFF;PRAGMA synchronous=OFF;")
         connection.executescript(_SCHEMA)
+
+        scan = _scan_stop_times(
+            connection,
+            files["stop_times.txt"],
+            _Feed(
+                routes,
+                pattern_trips,
+                timetable_trips,
+                stops,
+                wanted_stop_ids,
+                extra_stop_codes,
+            ),
+        )
+        if scan.pending:
+            _resolve_pending(connection, files["trips.txt"], routes, scan)
+        stats["stop_times_scanned"] = scan.scanned
+        stats["patterns"] = scan.patterns
+        stats["departures"] = scan.departures
+        stats["origin_violations"] = scan.violations
+        if scan.violations:
+            _LOGGER.warning(
+                "%s GTFS trips are not stored in stop order; their rows will "
+                "not be matched to live arrivals by trip",
+                f"{scan.violations:,}",
+            )
+
+        # Shapes only for the routes through the indexed stops: the card draws a
+        # route from a stop's board, and every route would cost tens of MB.
+        wanted_shapes = {
+            shape_id
+            for key, shape_id in route_shapes.items()
+            if routes[key][0] in scan.serving
+        }
+        shape_rows: list[tuple[str, bytes]] = []
+        if wanted_shapes and "shapes.txt" in files:
+            # Each shape_id once, however many routes share it.
+            for shape_id, (seqs, lats, lons) in read_shapes(
+                _member_lines(files["shapes.txt"]), wanted_shapes
+            ).items():
+                if (blob := encode_shape(seqs, lats, lons)) is not None:
+                    shape_rows.append((shape_id, blob))
+        stats["shapes"] = len(shape_rows)
+
         connection.executemany(
             "INSERT OR REPLACE INTO stops VALUES (?,?,?,?,?,?)", list(stops.values())
         )
         connection.executemany(
-            "INSERT OR REPLACE INTO routes VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO routes VALUES (?,?,?,?,?,?,?,?)",
             [
                 (
                     rid,
@@ -757,15 +772,30 @@ def stage_index(
                     rtype,
                     headsigns.get(key, ""),
                     route_shapes.get(key),
+                    agency_id,
                 )
-                for key, (rid, short, long_name, agency, rtype) in routes.items()
+                for key, (
+                    rid,
+                    short,
+                    long_name,
+                    agency,
+                    rtype,
+                    agency_id,
+                ) in routes.items()
             ],
         )
         connection.executemany("INSERT INTO shapes VALUES (?,?)", shape_rows)
-        connection.executemany("INSERT INTO patterns VALUES (?,?,?,?)", patterns)
-        connection.executemany("INSERT INTO departures VALUES (?,?,?,?)", departures)
         connection.executemany(
             "INSERT OR REPLACE INTO calendar VALUES (?,?,?,?)", calendar_rows
+        )
+        connection.executemany(
+            "INSERT INTO calendar_dates VALUES (?,?,?)", exception_rows
+        )
+        # הקווים בכל תחנה, מחושבים פעם אחת כאן ולא בכל polling.
+        connection.execute(
+            "INSERT OR IGNORE INTO stop_routes "
+            "SELECT stop_code, route_id FROM patterns "
+            "UNION SELECT stop_code, route_id FROM departures"
         )
         connection.executescript(_INDEXES)
         connection.executemany(
@@ -778,6 +808,8 @@ def stage_index(
                 # still needs rebuilding once a stop is added, and the version
                 # token alone cannot say that.
                 ("stops", ",".join(str(code) for code in sorted(extra_stop_codes))),
+                ("coverage_end", str(coverage_end)),
+                ("max_sec", str(scan.max_sec)),
             ],
         )
         connection.commit()
@@ -789,6 +821,209 @@ def stage_index(
 
     stats["db_bytes"] = tmp_path.stat().st_size
     return stats
+
+
+@dataclass(slots=True)
+class _Feed:
+    """מה שנקרא מהקבצים הקטנים, ומשמש את סריקת stop_times."""
+
+    routes: dict[str, tuple[int, str, str, str, str, str]]
+    pattern_trips: dict[str, str]
+    timetable_trips: dict[str, tuple[str, int]]
+    stops: dict[str, _StopRow]
+    wanted_stop_ids: set[str]
+    extra_stop_codes: frozenset[int]
+
+
+@dataclass(slots=True)
+class _Block:
+    """רצף שורות stop_times של נסיעה אחת, כפי שהן מגיעות בזרם."""
+
+    trip_id: str
+    idx: int
+    pattern_route: str | None
+    timetable: tuple[str, int] | None
+    origin: int | None = None
+    dest: int | None = None
+    base: int | None = None
+    last_seq: int | None = None
+    valid: bool = True
+    kept: bool = False
+
+
+@dataclass(slots=True)
+class _Scan:
+    """מה שסריקת stop_times מחזירה, אחרי שהשורות עצמן כבר נכתבו ל-SQLite."""
+
+    scanned: int = 0
+    patterns: int = 0
+    departures: int = 0
+    violations: int = 0
+    max_sec: int = 0
+    serving: set[int] = field(default_factory=set)
+    # שורות בתחנה מוגדרת של נסיעה שה-route שלה עוד לא ידוע:
+    # (trip_id, stop_code, arrival_sec, trip_idx).
+    pending: list[tuple[str, int, int, int]] = field(default_factory=list)
+
+
+class _Writer:
+    """צובר שורות וכותב אותן במנות, כדי שהבנייה לא תחזיק את כולן בזיכרון."""
+
+    def __init__(self, connection: sqlite3.Connection, sql: str) -> None:
+        self._connection = connection
+        self._sql = sql
+        self._rows: list[tuple[Any, ...]] = []
+
+    def add(self, row: tuple[Any, ...]) -> None:
+        self._rows.append(row)
+        if len(self._rows) >= _BATCH_ROWS:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._rows:
+            self._connection.executemany(self._sql, self._rows)
+            self._rows.clear()
+
+
+def _scan_stop_times(connection: sqlite3.Connection, path: Path, feed: _Feed) -> _Scan:
+    """מעבר יחיד על stop_times: דפוסי קווים, לוחות זמנים, ומוצא ויעד לכל נסיעה.
+
+    המוצא והיעד נלקחים מהשורה הראשונה והאחרונה של רצף הנסיעה, ולכן תקפים רק
+    אם הקובץ ממוין לפי נסיעה ו-stop_sequence עולה בתוכה. רצף שלא מתחיל ב-0 או ב-1,
+    או שה-sequence בו לא עולה, נשמר בלי מוצא ויעד ונספר כהפרה.
+    """
+    lines = _member_lines(path)
+    columns = next(csv.reader([next(lines, "")]), [])
+    try:
+        i_trip, i_arr, i_dep, i_stop, i_seq = (
+            columns.index(name)
+            for name in (
+                "trip_id",
+                "arrival_time",
+                "departure_time",
+                "stop_id",
+                "stop_sequence",
+            )
+        )
+    except ValueError as err:
+        raise GtfsError(f"stop_times.txt lacks a column: {err}") from err
+    width = max(i_trip, i_arr, i_dep, i_stop, i_seq)
+    routes, stops, wanted_stop_ids = feed.routes, feed.stops, feed.wanted_stop_ids
+    extra_stop_codes = feed.extra_stop_codes
+
+    scan = _Scan()
+    patterns = _Writer(connection, "INSERT INTO patterns VALUES (?,?,?,?)")
+    departures = _Writer(connection, "INSERT INTO departures VALUES (?,?,?,?,?)")
+    trips = _Writer(connection, "INSERT INTO trips VALUES (?,?,?)")
+
+    def close(block: _Block) -> None:
+        if not block.kept:
+            return
+        if not block.valid:
+            scan.violations += 1
+            trips.add((block.idx, None, None))
+        else:
+            trips.add((block.idx, block.origin, block.dest))
+
+    block: _Block | None = None
+    for line in lines:
+        scan.scanned += 1
+        trip_id = (
+            line[: line.find(",")]
+            if i_trip == 0
+            else line.split(",", i_trip + 1)[i_trip]
+        )
+        if block is None or trip_id != block.trip_id:
+            if block is not None:
+                close(block)
+            block = _Block(
+                trip_id,
+                block.idx + 1 if block is not None else 0,
+                feed.pattern_trips.get(trip_id),
+                feed.timetable_trips.get(trip_id),
+            )
+        if (
+            block.pattern_route is None
+            and block.timetable is None
+            and not wanted_stop_ids
+        ):
+            continue
+
+        fields = line.split(",", width + 1)
+        if len(fields) <= width:
+            continue
+        seq = _int(fields[i_seq], -1)
+        if block.last_seq is None:
+            block.valid = 0 <= seq <= 1
+            departure = _seconds(fields[i_dep])
+            block.origin = (
+                departure if departure is not None else _seconds(fields[i_arr])
+            )
+        elif seq <= block.last_seq:
+            block.valid = False
+        block.last_seq = seq
+        stop_id = fields[i_stop]
+        stop = stops.get(stop_id)
+        # היעד הוא תחנת השורה האחרונה ברצף, גם אם היא לא נשמרת לשום טבלה.
+        block.dest = stop[0] if stop is not None else None
+        if stop is None:
+            continue
+        arrival = _seconds(fields[i_arr])
+        if arrival is None:
+            continue
+        code = stop[0]
+
+        if block.pattern_route is not None:
+            if block.base is None:
+                block.base = arrival
+            route_id = routes[block.pattern_route][0]
+            patterns.add((route_id, seq, code, arrival - block.base))
+            scan.patterns += 1
+            if code in extra_stop_codes:
+                scan.serving.add(route_id)
+        if block.timetable is not None:
+            route_id = routes[block.timetable[0]][0]
+            departures.add((code, route_id, block.timetable[1], arrival, block.idx))
+            scan.departures += 1
+            block.kept = True
+            scan.max_sec = max(scan.max_sec, arrival)
+            if code in extra_stop_codes:
+                scan.serving.add(route_id)
+        elif stop_id in wanted_stop_ids:
+            scan.pending.append((trip_id, code, arrival, block.idx))
+            block.kept = True
+            scan.max_sec = max(scan.max_sec, arrival)
+
+    if block is not None:
+        close(block)
+    for writer in (patterns, departures, trips):
+        writer.flush()
+    return scan
+
+
+def _resolve_pending(
+    connection: sqlite3.Connection,
+    trips_path: Path,
+    routes: dict[str, tuple[int, str, str, str, str, str]],
+    scan: _Scan,
+) -> None:
+    """משלים route ושירות לשורות של תחנות מוגדרות, במעבר זול שני על trips.txt."""
+    wanted_trips = {trip_id for trip_id, _, _, _ in scan.pending}
+    resolved: dict[str, tuple[int, int]] = {}
+    for row in _member_rows(trips_path):
+        trip_id = row.get("trip_id", "")
+        if trip_id not in wanted_trips:
+            continue
+        if route := routes.get(row.get("route_id", "")):
+            resolved[trip_id] = (route[0], _int(row.get("service_id")))
+    departures = _Writer(connection, "INSERT INTO departures VALUES (?,?,?,?,?)")
+    for trip_id, code, arrival, trip_idx in scan.pending:
+        if (entry := resolved.get(trip_id)) is not None:
+            departures.add((code, entry[0], entry[1], arrival, trip_idx))
+            scan.departures += 1
+            scan.serving.add(entry[0])
+    departures.flush()
+    scan.pending.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -842,60 +1077,139 @@ def stored_built(connection: sqlite3.Connection) -> str | None:
     return row["value"] if row else None
 
 
+def _stored_int(connection: sqlite3.Connection, key: str) -> int | None:
+    row = connection.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    value = _int(row["value"], -1) if row else -1
+    return value if value >= 0 else None
+
+
+def stored_coverage_end(connection: sqlite3.Connection) -> date | None:
+    """היום האחרון שיש בו שירות באינדקס, או None באינדקס שלא רשם אותו."""
+    stamp = _stored_int(connection, "coverage_end")
+    if not stamp:
+        return None
+    try:
+        return datetime.strptime(str(stamp), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def stored_max_sec(connection: sqlite3.Connection) -> int | None:
+    """השנייה המאוחרת ביותר של יום שירות שנשמרה בלוח הזמנים."""
+    return _stored_int(connection, "max_sec")
+
+
+def has_table(connection: sqlite3.Connection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
 def service_day_bit(day: date) -> int:
     """The calendar bit for a weekday; GTFS weeks start on Sunday."""
     return 1 << ((day.weekday() + 1) % 7)
 
 
+def service_day_base(day: date) -> datetime:
+    """נקודת האפס של יום שירות, ב-UTC.
+
+    לפי תקן GTFS זמנים נמדדים מ-"noon minus 12h" של יום השירות. בדרך כלל זו
+    חצות, אבל לא בימים שבהם השעון זז.
+    """
+    noon = datetime.combine(day, time(12), tzinfo=ISRAEL_TZ)
+    return noon.astimezone(UTC) - timedelta(hours=12)
+
+
+# שירות פעיל ביום מסוים: calendar פחות חריגים מסוג 2, ובנוסף חריגים מסוג 1.
 _DEPARTURES_SQL: Final = """
 SELECT d.route_id, d.arrival_sec, r.short_name, r.long_name,
-       r.agency, r.route_type, r.headsign
+       r.agency, r.route_type, r.headsign, r.agency_id,
+       t.origin_sec, t.dest_code
   FROM departures d
   JOIN routes r ON r.route_id = d.route_id
- WHERE d.stop_code = ?
-   AND d.arrival_sec BETWEEN ? AND ?
+  LEFT JOIN trips t ON t.trip_idx = d.trip_idx
+ WHERE d.stop_code = :stop
+   AND d.arrival_sec BETWEEN :low AND :high
    AND d.service_id IN (
        SELECT service_id FROM calendar
-        WHERE (days & ?) != 0 AND start_date <= ? AND end_date >= ?)
+        WHERE (days & :bit) != 0 AND start_date <= :day AND end_date >= :day
+          AND service_id NOT IN (
+              SELECT service_id FROM calendar_dates
+               WHERE date = :day AND exception_type = 2)
+       UNION
+       SELECT service_id FROM calendar_dates
+        WHERE date = :day AND exception_type = 1)
  ORDER BY d.arrival_sec
- LIMIT 100
 """
 
 
-def departures_at(
-    connection: sqlite3.Connection, stop_code: int, now: datetime, hours: int = 3
-) -> list[tuple[sqlite3.Row, datetime]]:
-    """Timetabled departures in the next few hours, with absolute times.
+@dataclass(frozen=True, slots=True)
+class ScheduledRow:
+    """שורת לוח זמנים עם הזמנים המוחלטים שלה."""
 
-    A trip that started yesterday and runs past midnight is stored with a time
-    beyond 24:00, so yesterday's service day is queried as well.
+    row: sqlite3.Row
+    when: datetime
+    origin: datetime | None
+
+
+def departures_at(
+    connection: sqlite3.Connection,
+    stop_code: int,
+    start: datetime,
+    end: datetime,
+    max_sec: int | None = None,
+) -> list[ScheduledRow]:
+    """Timetabled departures between ``start`` and ``end``, with absolute times.
+
+    נבדקים אתמול, היום ומחר: נסיעה שהתחילה אתמול נשמרת עם זמן מעבר ל-24:00,
+    ובפורמט הישן נסיעה של 00:30 שייכת ליום השירות של מחר. גבולות החלון
+    מחושבים לכל יום מנקודת האפס שלו, כך שימים של 23 ו-25 שעות לא מאבדים שעה.
+    יום שהחלון לא נוגע בו לא נשאל בכלל.
 
     The active services stay inside the statement as a subquery: the feed has
     ~44k calendar rows and thousands are live on any given day, so lifting them
     into a Python list only to send them back as bind parameters is slower than
     letting SQLite join them.
     """
-    results: list[tuple[sqlite3.Row, datetime]] = []
-    for day_offset in (0, -1):
-        day = (now + timedelta(days=day_offset)).date()
-        midnight = datetime.combine(day, datetime.min.time(), tzinfo=now.tzinfo)
-        start = int((now - midnight).total_seconds())
+    limit = _DEFAULT_MAX_SEC if max_sec is None else max_sec
+    first = start.astimezone(ISRAEL_TZ).date() - timedelta(days=1)
+    days = (end.astimezone(ISRAEL_TZ).date() - first).days + 1
+    results: list[ScheduledRow] = []
+    for day_offset in range(days):
+        day = first + timedelta(days=day_offset)
+        base = service_day_base(day)
+        low = math.floor((start - base).total_seconds())
+        high = math.ceil((end - base).total_seconds())
+        if high < 0 or low > limit:
+            continue
         stamp = int(day.strftime("%Y%m%d"))
         rows = connection.execute(
             _DEPARTURES_SQL,
-            (
-                stop_code,
-                start,
-                start + hours * 3600,
-                service_day_bit(day),
-                stamp,
-                stamp,
-            ),
+            {
+                "stop": stop_code,
+                "low": low,
+                "high": high,
+                "bit": service_day_bit(day),
+                "day": stamp,
+            },
         ).fetchall()
-        results.extend(
-            (row, midnight + timedelta(seconds=row["arrival_sec"])) for row in rows
-        )
-    results.sort(key=lambda item: item[1])
+        for row in rows:
+            origin = row["origin_sec"]
+            results.append(
+                ScheduledRow(
+                    row,
+                    (base + timedelta(seconds=row["arrival_sec"])).astimezone(
+                        ISRAEL_TZ
+                    ),
+                    (base + timedelta(seconds=origin)).astimezone(ISRAEL_TZ)
+                    if origin is not None
+                    else None,
+                )
+            )
+    results.sort(key=lambda item: item.when)
     return results
 
 
@@ -990,9 +1304,11 @@ def search_stops(
 
 
 def routes_at_stop(connection: sqlite3.Connection, code: int) -> list[RouteInfo]:
+    """כל הקווים בתחנה. אינדקס מסכמה ישנה, בלי stop_routes, נשען על הדפוסים."""
+    source = "stop_routes" if has_table(connection, "stop_routes") else "patterns"
     rows = connection.execute(
         "SELECT DISTINCT r.route_id, r.short_name, r.long_name, r.agency, "
-        "r.route_type, r.headsign FROM patterns p "
+        f"r.route_type, r.headsign FROM {source} p "
         "JOIN routes r ON r.route_id = p.route_id WHERE p.stop_code = ?",
         (code,),
     ).fetchall()
@@ -1040,21 +1356,30 @@ def route_shape(
 
 
 def scheduled_arrivals(
-    connection: sqlite3.Connection, code: int, now: datetime, hours: int = 3
+    connection: sqlite3.Connection,
+    code: int,
+    start: datetime,
+    end: datetime,
+    max_sec: int | None = None,
 ) -> list[Arrival]:
     """Timetabled arrivals as the card and the entities consume them."""
     arrivals = []
-    for row, when in departures_at(connection, code, now, hours):
+    for item in departures_at(connection, code, start, end, max_sec):
+        row = item.row
         route = route_of(row)
         arrivals.append(
             Arrival(
                 line_name=route.short_name or route.line_ref,
-                eta=when,
+                eta=item.when,
                 is_realtime=False,
                 destination=route.destination,
                 operator=route.agency,
                 line_ref=route.line_ref,
                 route_type=route.route_type,
+                scheduled=item.when,
+                origin=item.origin,
+                operator_id=row["agency_id"] or None,
+                dest_code=row["dest_code"],
             )
         )
     return arrivals

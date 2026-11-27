@@ -1,9 +1,9 @@
-"""Sensors for a stop: one aggregate set, plus a pair per tracked line.
+"""Sensors for a stop: the next arrival and the full board, plus one per line.
 
-Each line gets both a timestamp entity and a minutes entity. The timestamp one
-is what templates and time conditions want; the minutes one is what makes the
-obvious automation possible -- ``numeric_state`` below 5 on
-``sensor.<stop>_line_18_in`` fires when line 18 is five minutes away.
+The next arrival is a timestamp, which the frontend already shows as "in 5
+minutes". There is no minutes-until sensor: Home Assistant's sensor docs say a
+duration "should only change when the device reports a new value, not because
+time passes". "Five minutes before line 18" is the arrival trigger's offset.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
 )
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
@@ -22,7 +22,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .api import Arrival, localized, minutes_until
+from .api import Arrival, localized
 from .const import (
     ATTRIBUTION,
     CONF_LINES,
@@ -46,12 +46,12 @@ async def async_setup_entry(
     for subentry_id, coordinator in entry.runtime_data.items():
         entities: list[SensorEntity] = [
             NextArrivalSensor(coordinator),
-            NextArrivalMinutesSensor(coordinator),
             ArrivalCountSensor(coordinator),
         ]
-        for line in coordinator.subentry.data.get(CONF_LINES, []):
-            entities.append(NextArrivalSensor(coordinator, line))
-            entities.append(NextArrivalMinutesSensor(coordinator, line))
+        entities.extend(
+            NextArrivalSensor(coordinator, line)
+            for line in coordinator.subentry.data.get(CONF_LINES, [])
+        )
 
         _async_prune(registry, entry, subentry_id, {e.unique_id for e in entities})
         # The entities, and the device they create, belong to the stop the
@@ -118,7 +118,9 @@ class IsraelTransitEntity(CoordinatorEntity[IsraelTransitCoordinator], SensorEnt
         data: StopData | None = self.coordinator.data
         if data is None:
             return []
-        return data.for_line(self._line) if self._line else data.upcoming()
+        rows = data.for_line(self._line) if self._line else data.upcoming()
+        # נסיעה מבוטלת נשארת בלוח כדי שהכרטיס יראה אותה, אבל היא לא "ההגעה הבאה".
+        return [a for a in rows if not a.cancelled]
 
     @property
     def _next(self) -> Arrival | None:
@@ -158,23 +160,11 @@ class NextArrivalSensor(IsraelTransitEntity):
             "operator": localized(arrival.operator, self._language) or None,
             "is_realtime": arrival.is_realtime,
             "platform": arrival.platform,
+            # 0 הוא "בזמן", None הוא "לא ידוע": עיכוב מדווח רק כשהנסיעה זוהתה.
             "delay_minutes": arrival.delay_minutes,
+            "scheduled": arrival.scheduled,
+            "train_number": arrival.train_number,
         }
-
-
-class NextArrivalMinutesSensor(IsraelTransitEntity):
-    """Minutes until the next vehicle -- the entity automations trigger on."""
-
-    entity_suffix = "next_arrival_in"
-    _attr_device_class = SensorDeviceClass.DURATION
-    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
-    # Deliberately no state_class: this value changes purely with the passage of
-    # time, so long-term statistics for it would be meaningless.
-
-    @property
-    def native_value(self) -> int | None:
-        arrival = self._next
-        return minutes_until(arrival.eta) if arrival else None
 
 
 class ArrivalCountSensor(IsraelTransitEntity):
@@ -184,7 +174,7 @@ class ArrivalCountSensor(IsraelTransitEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     # The list is for templates and the card, not for history. Keeping it out of
     # the recorder is what lets it stay on the entity at all.
-    _unrecorded_attributes = frozenset({"arrivals", "lines"})
+    _unrecorded_attributes = frozenset({"arrivals", "lines", "updated_at"})
 
     @property
     def native_value(self) -> int:
@@ -201,6 +191,7 @@ class ArrivalCountSensor(IsraelTransitEntity):
             "stop_code": data.stop.code,
             "stop_name": data.stop.name,
             "has_realtime": data.has_realtime,
+            "updated_at": data.updated_at,
             "arrivals": [a.as_dict(self._language, now) for a in arrivals],
             "lines": sorted({a.line_name for a in arrivals}),
         }

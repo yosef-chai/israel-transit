@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry,
-    async_fire_time_changed,
-)
-from pytest_homeassistant_custom_component.typing import WebSocketGenerator
 
 from custom_components.israel_transit.api import (
     Arrival,
@@ -22,6 +18,11 @@ from custom_components.israel_transit.api import (
 )
 from custom_components.israel_transit.const import DATA_CLIENTS, DOMAIN
 
+from .common import (
+    MockConfigEntry,
+    WebSocketGenerator,
+    async_fire_time_changed,
+)
 from .conftest import DANKAL, STOP, TRAM_ROUTE, stop_subentry
 
 
@@ -100,6 +101,67 @@ async def test_an_unknown_stop_is_an_error_not_an_empty_board(
 
     assert not result["success"]
     assert result["error"]["code"] == "unknown_stop"
+
+
+async def test_a_stop_asked_about_during_the_first_build_is_not_called_unknown(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    loaded_entry: MockConfigEntry,
+    mock_index: AsyncMock,
+    mock_curlbus: AsyncMock,
+) -> None:
+    """Without an index no one can tell; "check the code" would be wrong."""
+    mock_index.available = False
+    mock_index.building = True
+    mock_index.async_stop.side_effect = IsraelTransitError("not built yet")
+    mock_curlbus.arrivals.side_effect = IsraelTransitError("curlbus HTTP 500")
+    client = await hass_ws_client(hass)
+
+    await client.send_json_auto_id({"type": f"{DOMAIN}/stop", "stop_code": 20092})
+    result = await client.receive_json()
+
+    assert result["error"]["code"] == "index_building"
+
+
+async def test_the_board_says_when_it_was_fetched(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    loaded_entry: MockConfigEntry,
+) -> None:
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": f"{DOMAIN}/stop", "stop_code": 21023})
+    result = await client.receive_json()
+
+    updated_at = dt_util.parse_datetime(result["result"]["updated_at"])
+    assert updated_at is not None and updated_at.utcoffset() == timedelta(0)
+    assert abs(updated_at - dt_util.utcnow()) < timedelta(minutes=1)
+
+
+async def test_cards_asking_for_one_stop_together_share_one_fetch(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    loaded_entry: MockConfigEntry,
+    mock_curlbus: AsyncMock,
+) -> None:
+    """A dashboard loads all its cards at once; curlbus should hear once."""
+    release = asyncio.Event()
+    calls_before = mock_curlbus.arrivals.call_count
+
+    async def slow(code: int):
+        await release.wait()
+        return (STOP, [])
+
+    mock_curlbus.arrivals.side_effect = slow
+    clients = [await hass_ws_client(hass) for _ in range(3)]
+    for client in clients:
+        await client.send_json_auto_id({"type": f"{DOMAIN}/stop", "stop_code": 20092})
+    await hass.async_block_till_done(wait_background_tasks=False)
+    await asyncio.sleep(0)
+    release.set()
+    results = [await client.receive_json() for client in clients]
+
+    assert all(result["success"] for result in results)
+    assert mock_curlbus.arrivals.call_count - calls_before == 1
 
 
 async def test_stop_routes_lists_every_line(

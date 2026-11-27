@@ -17,21 +17,23 @@ from freezegun.api import FrozenDateTimeFactory
 from homeassistant.components import automation
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import condition as condition_helper
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.trigger import TriggerConfig
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry,
-    async_fire_time_changed,
-    async_mock_service,
-)
 
 from custom_components.israel_transit import trigger as trigger_module
 from custom_components.israel_transit.api import Arrival, IsraelTransitError
 from custom_components.israel_transit.const import DOMAIN
 from custom_components.israel_transit.trigger import ArrivalTrigger
 
+from .common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+    async_mock_service,
+)
 from .conftest import STOP, stop_device
 
 START = datetime(2026, 10, 4, 9, 0, tzinfo=dt_util.UTC)
@@ -44,6 +46,8 @@ def bus(
     vehicle: str | None = "7",
     realtime: bool = True,
     delay: int | None = None,
+    scheduled: datetime | None = None,
+    cancelled: bool = False,
 ) -> Arrival:
     return Arrival(
         line_name=line,
@@ -55,6 +59,8 @@ def bus(
         route_type="3",
         vehicle_ref=vehicle,
         delay_minutes=delay,
+        scheduled=scheduled,
+        cancelled=cancelled,
     )
 
 
@@ -143,6 +149,7 @@ async def arrival_automation(
                             "eta": "{{ trigger.eta.isoformat() }}",
                             "is_realtime": "{{ trigger.is_realtime }}",
                             "delay": "{{ trigger.delay_minutes }}",
+                            "minutes": "{{ trigger.minutes }}",
                         },
                     }
                 ],
@@ -178,6 +185,8 @@ async def test_fires_once_the_set_time_before_the_arrival(
     assert str(calls[0].data["line"]) == "36"
     assert calls[0].data["stop_code"] == 21023
     assert calls[0].data["eta"] == at(10).isoformat()
+    # "Two minutes before" says two, even though the timer woke a moment late.
+    assert calls[0].data["minutes"] == 2
 
     # Later boards still carry the same bus; it has had its turn.
     await advance_to(hass, freezer, at(9))
@@ -491,6 +500,87 @@ async def test_a_delay_fires_once_when_it_reaches_the_threshold(
     assert len(calls) == 1
 
 
+async def test_a_bus_far_off_its_timetable_is_still_the_trip_that_fired(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    stop_target: dict[str, Any],
+    board: Callable[..., Any],
+) -> None:
+    """Five minutes late is past the three-minute window an ETA match allows.
+
+    Both boards placed the bus on its 10:00 run in the timetable, which is
+    what says it is the same trip.
+    """
+    calls = await arrival_automation(
+        hass, stop_target, {"offset": {"minutes": 2}, "offset_type": "before"}
+    )
+    await board(bus(at(10), vehicle=None, scheduled=at(10)))
+    await advance_to(hass, freezer, at(8))
+    assert len(calls) == 1
+
+    await advance_to(hass, freezer, at(9))
+    await board(bus(at(15), vehicle=None, scheduled=at(10)))
+    await advance_to(hass, freezer, at(14))
+    assert len(calls) == 1
+
+
+async def test_a_cancelled_trip_does_not_fire(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    stop_target: dict[str, Any],
+    board: Callable[..., Any],
+) -> None:
+    calls = await arrival_automation(hass, stop_target, {})
+    await board(bus(at(10)), bus(at(20), vehicle="8", cancelled=True))
+    # The one being waited for is cancelled on a later board.
+    await advance_to(hass, freezer, at(5))
+    await board(bus(at(10), cancelled=True), bus(at(20), vehicle="8", cancelled=True))
+
+    await advance_to(hass, freezer, at(25))
+    assert calls == []
+
+
+async def test_a_trip_that_appears_late_reports_the_minutes_actually_left(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    stop_target: dict[str, Any],
+    board: Callable[..., Any],
+) -> None:
+    """Five minutes before, for a bus first seen three minutes out: it says 3."""
+    calls = await arrival_automation(
+        hass, stop_target, {"offset": {"minutes": 5}, "offset_type": "before"}
+    )
+    await advance_to(hass, freezer, at(1))
+    await board(bus(at(4)))
+    assert len(calls) == 1
+    assert calls[0].data["minutes"] == 3
+
+
+async def test_a_stop_moved_out_of_the_targeted_area_stops_firing(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    entry: MockConfigEntry,
+    board: Callable[..., Any],
+) -> None:
+    """The target is followed, as Home Assistant's own triggers follow theirs."""
+    area = ar.async_get(hass).async_create("תחנות")
+    device = stop_device(hass, "21023")
+    assert device is not None
+    dr.async_get(hass).async_update_device(device.id, area_id=area.id)
+    await hass.async_block_till_done()
+    calls = await arrival_automation(hass, {"area_id": area.id}, {})
+
+    await board(bus(at(10)))
+    await advance_to(hass, freezer, at(10))
+    assert len(calls) == 1
+
+    dr.async_get(hass).async_update_device(device.id, area_id=None)
+    await hass.async_block_till_done()
+    await board(bus(at(20), vehicle="8"))
+    await advance_to(hass, freezer, at(20))
+    assert len(calls) == 1
+
+
 # --- conditions -------------------------------------------------------------
 
 
@@ -525,6 +615,22 @@ async def test_is_arriving_within(
     assert await check(
         hass, "is_arriving_within", stop_target, {"line": "36", "minutes": 10}
     )
+
+
+async def test_is_arriving_within_counts_seconds_not_whole_minutes(
+    hass: HomeAssistant, stop_target: dict[str, Any], board: Callable[..., Any]
+) -> None:
+    """5:59 away is not "within 5 minutes", even though it floors to 5."""
+    await board(bus(START + timedelta(minutes=5, seconds=59)))
+    assert not await check(hass, "is_arriving_within", stop_target, {"minutes": 5})
+    assert await check(hass, "is_arriving_within", stop_target, {"minutes": 6})
+
+
+async def test_a_cancelled_trip_is_not_arriving(
+    hass: HomeAssistant, stop_target: dict[str, Any], board: Callable[..., Any]
+) -> None:
+    await board(bus(at(4), cancelled=True))
+    assert not await check(hass, "is_arriving_within", stop_target, {"minutes": 5})
 
 
 async def test_is_realtime_available(

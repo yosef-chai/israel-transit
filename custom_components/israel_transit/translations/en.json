@@ -93,20 +93,20 @@
           },
           "delay_minutes": {
             "name": "Delay"
+          },
+          "scheduled": {
+            "name": "Scheduled"
+          },
+          "train_number": {
+            "name": "Train number"
           }
         }
-      },
-      "next_arrival_in": {
-        "name": "Next arrival in"
       },
       "arrivals": {
         "name": "Upcoming arrivals"
       },
       "line_next_arrival": {
         "name": "Line {line} next arrival"
-      },
-      "line_next_arrival_in": {
-        "name": "Line {line} next arrival in"
       }
     }
   },
@@ -200,9 +200,23 @@
         }
       }
     },
-    "realtime_unavailable": {
-      "title": "Real-time arrivals are unavailable",
-      "description": "None of your bus stops has had real-time data for over half an hour, so their times come from the timetable. The real-time service (curlbus) may be down. This clears by itself once it answers again.\n\nThe last error was: {error}"
+    "gtfs_index_stale": {
+      "title": "The public transport timetable is about to run out",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Refresh the timetable",
+            "description": "The local copy of the Ministry of Transport timetable only has service until {date}, and no newer one has been published yet. After that date light rail, the cable lines and trains have no times to show, and buses are left with real-time only.\n\nSubmit to download the timetable again now (about 150 MB). This can take a few minutes.\n\n{error}"
+          }
+        },
+        "progress": {
+          "rebuilding": "Downloading and indexing the Ministry of Transport timetable. This can take a few minutes."
+        },
+        "error": {
+          "rebuild_failed": "The rebuild failed again. Check the network connection and free disk space, then try again.",
+          "rebuild_in_progress": "A rebuild is already running. Wait for it to finish."
+        }
+      }
     }
   },
   "triggers": {

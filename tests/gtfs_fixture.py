@@ -72,6 +72,20 @@ SHAPES = """shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence
 2,32.072666,34.793390,10
 """
 
+# הפורמט החדש של משרד התחבורה (מסמך המפתחים v4): תוויות באנגלית ב-stop_desc,
+# ו-calendar_dates במקום calendar, עם service_id שהוא התאריך.
+V4_STOPS = """stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,location_type,parent_station,stop_timezone,wheelchair_boarding,level_id,platform_code
+1,35962,הקוממיות,Street: אנה פרנק City: בת ים Platform:  Floor:,32.010000,34.750000,35962,0,,Asia/Jerusalem,,,
+2,36307,קרית אריה,Street: ז'בוטינסקי City: פתח תקווה Platform:  Floor:,32.100000,34.870000,36307,0,,Asia/Jerusalem,,,
+3,21023,ת. רכבת השלום,Street: גבעת התחמושת City: תל אביב יפו Platform:  Floor:,32.072666,34.793390,21023,0,,Asia/Jerusalem,,,
+4,99999,ללא עיר,,31.000000,35.000000,99999,0,,Asia/Jerusalem,,,
+"""
+
+V4_CALENDAR_DATES = """service_id,date,exception_type
+20260830,20260830,1
+20260831,20260831,1
+"""
+
 MEMBERS = {
     "agency.txt": AGENCY,
     "routes.txt": ROUTES,

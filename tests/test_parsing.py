@@ -7,6 +7,7 @@ know, and sending the literal string "None" where a timestamp belongs.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 from datetime import datetime, timedelta
@@ -269,6 +270,89 @@ async def test_another_stop_is_unaffected_by_one_stop_backing_off():
     assert stop is not None
 
 
+class _Clock:
+    """שעון עומד: כל הקריאות "מקבילות", וכל שינה רק נרשמת."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+        monkeypatch.setattr(api, "monotonic", lambda: self.now)
+        monkeypatch.setattr(api.asyncio, "sleep", self.sleep)
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(round(seconds, 3))
+
+
+class _Sequence(_FakeSession):
+    def __init__(self, *responses: _FakeResponse) -> None:
+        super().__init__(responses[-1])
+        self.responses = list(responses)
+
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        return self.responses.pop(0) if len(self.responses) > 1 else self.response
+
+
+def _ok() -> _FakeResponse:
+    return _FakeResponse(200, "application/json", json.dumps(CURLBUS_EMPTY))
+
+
+def _limited(retry_after: str) -> _FakeResponse:
+    response = _FakeResponse(429, "text/plain", "error code: 1015")
+    response.headers = {"Retry-After": retry_after}
+    return response
+
+
+@pytest.mark.asyncio
+async def test_requests_are_spaced_to_stay_under_the_curlbus_limit(monkeypatch):
+    """Cloudflare חוסם את הבקשה השישית בתוך 10 שניות, ותחנות יורות יחד."""
+    clock = _Clock(monkeypatch)
+    client = api.CurlbusClient(_FakeSession(_ok()))
+
+    await asyncio.gather(
+        *(client.arrivals(20000 + code) for code in range(2 * api.CURLBUS_BURST + 1))
+    )
+
+    # ארבע מיד, ארבע אחרי חלון אחד, והתשיעית אחרי שניים.
+    assert clock.slept == [10.0] * api.CURLBUS_BURST + [20.0]
+
+
+@pytest.mark.asyncio
+async def test_a_429_waits_out_retry_after_once_without_blaming_the_stop(monkeypatch):
+    clock = _Clock(monkeypatch)
+    session = _Sequence(_limited("3"), _ok())
+    client = api.CurlbusClient(session)
+
+    stop, arrivals = await client.arrivals(21023)
+
+    assert stop is not None
+    assert arrivals == []
+    assert session.calls == 2
+    assert clock.slept == [3.0]
+    assert client._failures == {}
+
+
+@pytest.mark.asyncio
+async def test_a_long_block_gives_up_for_this_round_without_asking_again(monkeypatch):
+    _Clock(monkeypatch)
+    session = _Sequence(_limited("60"), _ok())
+    client = api.CurlbusClient(session)
+
+    with pytest.raises(api.RealtimeUnavailable, match="rate limiting"):
+        await client.arrivals(21023)
+
+    assert session.calls == 1
+    assert client._failures == {}
+
+
+@pytest.mark.parametrize(
+    ("header", "seconds"),
+    [("10", 10.0), ("0", 1.0), ("999", 60.0), (None, 10.0), ("Wed, 21 Oct", 10.0)],
+)
+def test_retry_after_is_read_safely(header, seconds):
+    assert api._retry_after_header(header) == seconds
+
+
 # --- GTFS shapes ------------------------------------------------------------
 
 
@@ -400,3 +484,143 @@ def test_rail_station_matching(gtfs_name, expected):
 def test_stations_missing_from_the_table_return_none(unknown):
     """New Eastern Railway stops must not be mismatched onto an old station."""
     assert rail_stations.rail_station_id(unknown) is None
+
+
+# --- times across a clock change --------------------------------------------
+
+
+def test_minutes_until_counts_real_minutes_across_the_spring_change():
+    """27.03.2026: 01:30 to 03:30 on the clock is one real hour, not two."""
+    before = datetime(2026, 3, 27, 1, 30, tzinfo=api.ISRAEL_TZ)
+    after = datetime(2026, 3, 27, 3, 30, tzinfo=api.ISRAEL_TZ)
+    assert api.minutes_until(after, before) == 60
+
+
+def test_minutes_until_counts_real_minutes_in_the_repeated_autumn_hour():
+    """25.10.2026: 01:30 comes twice, an hour apart."""
+    first = datetime(2026, 10, 25, 1, 30, tzinfo=api.ISRAEL_TZ)
+    second = first.replace(fold=1)
+    assert api.minutes_until(second, first) == 60
+
+
+# --- what curlbus says about a trip -----------------------------------------
+
+
+def _visit(**fields):
+    return {"line_id": "960", "line_name": "36", **fields}
+
+
+def _parse(*visits):
+    return api.parse_curlbus({"visits": {"1": list(visits)}})[1]
+
+
+def test_a_cancelled_visit_is_flagged():
+    (arrival,) = _parse(
+        _visit(eta="2026-08-30 22:06:00+03:00", status="Cancelled", operator_id="15")
+    )
+    assert arrival.cancelled is True
+    assert arrival.is_realtime is True
+    assert arrival.operator_id == "15"
+
+
+def test_a_cancellation_without_an_eta_is_kept_as_a_marker():
+    """It has no time of its own; the merge gives it the timetabled one."""
+    (arrival,) = _parse(
+        _visit(eta="None", status="cancelled", departed="2026-08-30 21:40:00+03:00")
+    )
+    assert arrival.cancelled is True
+    assert arrival.is_realtime is False
+    assert arrival.eta == arrival.departed
+
+
+def test_a_visit_without_an_eta_that_is_not_cancelled_is_dropped():
+    assert _parse(_visit(eta="None", departed="2026-08-30 21:40:00+03:00")) == []
+
+
+def test_the_destination_stop_is_read_as_a_number():
+    (arrival,) = _parse(_visit(eta="2026-08-30 22:06:00+03:00", destination_id="17034"))
+    assert arrival.dest_code == 17034
+
+
+def test_a_visit_reported_twice_is_kept_once_the_newer_one():
+    common = {"departed": "2026-08-30 21:40:00+03:00"}
+    old = _visit(
+        eta="2026-08-30 22:06:00+03:00",
+        timestamp="2026-08-30 22:00:00+03:00",
+        vehicle_ref="old",
+        **common,
+    )
+    new = _visit(
+        eta="2026-08-30 22:07:00+03:00",
+        timestamp="2026-08-30 22:01:00+03:00",
+        vehicle_ref="new",
+        **common,
+    )
+    assert [a.vehicle_ref for a in _parse(old, new)] == ["new"]
+
+
+def test_a_loop_line_passing_twice_keeps_both_visits():
+    common = {"departed": "2026-08-30 21:40:00+03:00"}
+    rows = _parse(
+        _visit(eta="2026-08-30 22:06:00+03:00", **common),
+        _visit(eta="2026-08-30 22:50:00+03:00", **common),
+    )
+    assert len(rows) == 2
+
+
+# --- rail.co.il never breaks the board --------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("6702", "6702"),
+        ("06702", "6702"),
+        (6702, "6702"),
+        ("0", "0"),
+        ("", None),
+        (None, None),
+        (" A1 ", "A1"),
+    ],
+)
+def test_train_numbers_are_normalised(value, expected):
+    assert api.normalize_train_number(value) == expected
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        "junk",
+        {"result": []},
+        {"result": {"travels": "x"}},
+        {"result": {"travels": [{"trains": "x"}]}},
+        {"result": {"travels": [None]}},
+    ],
+)
+def test_parse_rail_never_raises(payload):
+    assert api.parse_rail(payload) == []
+
+
+def test_a_garbled_delay_is_treated_as_unknown():
+    payload = {
+        "result": {
+            "travels": [
+                {
+                    "departureTime": "2026-08-30T12:00:00",
+                    "trains": [
+                        {
+                            "trainNumber": "06702",
+                            "orignStation": 3700,
+                            "etaDiffTimes": [{"stationId": 3700, "difMin": "x"}],
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    (train,) = api.parse_rail(payload)
+    assert train.delay_minutes is None
+    assert train.is_realtime is False
+    assert train.train_number == "6702"
+    assert train.scheduled == train.eta

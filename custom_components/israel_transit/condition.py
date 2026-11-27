@@ -22,7 +22,6 @@ from homeassistant.helpers.condition import (
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
-from .api import minutes_until
 from .automation_helpers import async_resolve_stops
 from .const import CONF_LINE, CONF_MINUTES
 from .coordinator import StopData, async_find_coordinator
@@ -82,13 +81,14 @@ class IsArrivingWithinCondition(_StopCondition):
     @override
     def _async_check(self, **kwargs: Unpack[ConditionCheckParams]) -> bool:
         line = str(self._options.get(CONF_LINE) or "").strip() or None
-        limit = int(self._options[CONF_MINUTES])
+        # בשניות ולא בדקות שלמות: "תוך 5 דקות" לא מתקיים כשנותרו 5:59.
+        limit = int(self._options[CONF_MINUTES]) * 60
         now = dt_util.utcnow()
         return any(
-            minutes_until(arrival.eta, now) <= limit
+            arrival.eta.timestamp() - now.timestamp() <= limit
             for board in self._boards()
             for arrival in board.upcoming(now)
-            if line is None or arrival.line_name == line
+            if not arrival.cancelled and (line is None or arrival.line_name == line)
         )
 
 

@@ -8,6 +8,7 @@ machine and the recorder, and inherits Home Assistant's own authentication.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from time import monotonic
 from typing import Any
@@ -21,6 +22,7 @@ from .api import IsraelTransitError, parse_dt
 from .const import (
     DATA_CLIENTS,
     DATA_STOP_CACHE,
+    DATA_STOP_IN_FLIGHT,
     DOMAIN,
     STOP_CACHE_MAX_ENTRIES,
     STOP_CACHE_TTL,
@@ -43,14 +45,18 @@ def _clients(hass: HomeAssistant) -> Clients:
     return clients
 
 
-async def _async_stop_data(
+async def async_stop_board(
     hass: HomeAssistant, stop_code: int, rail_destination: str | None
 ) -> StopData:
     """One upstream request per stop per interval, however many cards ask.
 
     Every open dashboard polls this command, and curlbus is a single free
     community service, so an already-polled stop is answered from its
-    coordinator and anything else from a short-lived cache.
+    coordinator and anything else from a short-lived cache. Shared by the
+    get_arrivals action, for the same reason.
+
+    לוח של coordinator שהרענון האחרון שלו נכשל עדיין מוגש: updated_at מסגיר
+    את גילו, ושליפה טרייה מכל כרטיס הייתה מציפה את curlbus דווקא כשהוא נופל.
     """
     coordinator = async_find_coordinator(hass, stop_code)
     # A stop whose first read failed has no board yet, and a configured stop
@@ -71,9 +77,22 @@ async def _async_stop_data(
     if cached is not None and now - cached[0] < STOP_CACHE_TTL:
         return cached[1]
 
-    data = await async_fetch_stop(
-        _clients(hass), stop_code, rail_destination=rail_destination
+    # כמה כרטיסים של אותה תחנה נטענים יחד עם הדשבורד: כולם מחכים לשליפה אחת.
+    in_flight: dict[tuple[int, str | None], asyncio.Future[StopData]] = hass.data[
+        DOMAIN
+    ].setdefault(DATA_STOP_IN_FLIGHT, {})
+    if (pending := in_flight.get(key)) is not None:
+        return await asyncio.shield(pending)
+    task = hass.async_create_task(
+        async_fetch_stop(_clients(hass), stop_code, rail_destination=rail_destination),
+        f"{DOMAIN}-stop-{stop_code}",
+        eager_start=False,
     )
+    in_flight[key] = task
+    try:
+        data = await asyncio.shield(task)
+    finally:
+        in_flight.pop(key, None)
     cache[key] = (now, data)
     _prune_cache(cache, now)
     return data
@@ -139,11 +158,18 @@ async def ws_stop(
     clients = _clients(hass)
     clients.async_note_stop(msg["stop_code"])
     try:
-        data = await _async_stop_data(
+        data = await async_stop_board(
             hass, msg["stop_code"], msg.get("rail_destination")
         )
     except IsraelTransitError as err:
-        connection.send_error(msg["id"], "unknown_stop", str(err))
+        # בלי אינדקס, בזמן הבנייה הראשונה, אי אפשר לדעת אם הקוד שגוי. "תחנה לא
+        # נמצאה" היה שולח את המשתמש לבדוק קוד נכון.
+        code = (
+            "index_building"
+            if not clients.index.available and clients.rebuilding
+            else "unknown_stop"
+        )
+        connection.send_error(msg["id"], code, str(err))
         return
     if data.realtime_error and not data.arrivals:
         clients.async_request_timetable(msg["stop_code"])

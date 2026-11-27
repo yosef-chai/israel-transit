@@ -15,20 +15,27 @@ timetables all come from the local GTFS index instead; see :mod:`.gtfs`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import aiohttp
 
 from .const import (
     CURLBUS_BASE,
+    CURLBUS_BURST,
+    CURLBUS_MAX_WAIT,
+    CURLBUS_TIMEOUT,
+    CURLBUS_WINDOW,
     MAX_ARRIVALS,
     RAIL_API_KEY,
     RAIL_BASE,
+    RAIL_TIMEOUT,
     REALTIME_BACKOFF_BASE,
     REALTIME_BACKOFF_MAX,
     REALTIME_FAILURES_BEFORE_BACKOFF,
@@ -55,6 +62,18 @@ class RealtimeUnavailable(IsraelTransitError):
 
 class InvalidStop(IsraelTransitError):
     """The stop code is not known to the data source."""
+
+
+class RateLimited(RealtimeUnavailable):
+    """curlbus ענה 429: השירות מגביל, התחנה עצמה בסדר."""
+
+
+def _retry_after_header(value: str | None) -> float:
+    """Retry-After בשניות, בין 1 ל-60. תאריך HTTP או ערך משובש נחשבים לחלון אחד."""
+    try:
+        return float(min(max(int(value or ""), 1), 60))
+    except ValueError:
+        return CURLBUS_WINDOW
 
 
 def localized(value: Any, lang: str = "he", default: str = "") -> str:
@@ -90,9 +109,13 @@ def parse_dt(raw: Any) -> datetime | None:
 
 
 def minutes_until(when: datetime, now: datetime | None = None) -> int:
-    """Whole minutes from now until ``when``; never negative."""
+    """Whole minutes from now until ``when``; never negative.
+
+    לפי timestamp ולא בחיסור datetime: שני זמנים עם אותו ZoneInfo מחוסרים כשעון
+    קיר, ובימים שהשעון זז זה מוסיף או מוריד שעה.
+    """
     now = now or datetime.now(ISRAEL_TZ)
-    return max(0, int((when - now).total_seconds() // 60))
+    return max(0, int((when.timestamp() - now.timestamp()) // 60))
 
 
 def _as_float(value: Any) -> float | None:
@@ -100,6 +123,22 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_train_number(value: Any) -> str | None:
+    """מספר רכבת בלי אפסים מובילים, כדי ש-SIRI ו-rail.co.il יתאימו זה לזה."""
+    text = str(value).strip() if value is not None else ""
+    return (text.lstrip("0") or "0") if text else None
+
+
+CANCELLED_STATUSES: Final = frozenset({"cancelled", "canceled"})
 
 
 def line_sort_key(name: str) -> tuple[int, str]:
@@ -152,6 +191,15 @@ class Arrival:
     delay_minutes: int | None = None
     # מתי curlbus ראה את הרכב לאחרונה, כדי שהכרטיס ידע כמה המיקום ישן.
     vehicle_seen: datetime | None = None
+    # זמן ההגעה המתוכנן לתחנה, כשהנסיעה זוהתה בלוח הזמנים.
+    scheduled: datetime | None = None
+    # שעת היציאה המתוכננת מתחנת המוצא לפי GTFS. בשורה חיה התפקיד הזה של departed.
+    origin: datetime | None = None
+    cancelled: bool = False
+    train_number: str | None = None
+    # מזהה המפעיל ותחנת היעד, לזיהוי נסיעה כשה-route_id לא מוכר.
+    operator_id: str | None = None
+    dest_code: int | None = None
 
     def as_dict(self, lang: str = "he", now: datetime | None = None) -> dict[str, Any]:
         return {
@@ -172,6 +220,9 @@ class Arrival:
             "vehicle_seen": (
                 self.vehicle_seen.isoformat() if self.vehicle_seen else None
             ),
+            "scheduled": self.scheduled.isoformat() if self.scheduled else None,
+            "cancelled": self.cancelled,
+            "train_number": self.train_number,
         }
 
 
@@ -279,29 +330,74 @@ def parse_curlbus(payload: dict[str, Any]) -> tuple[Stop | None, list[Arrival]]:
     arrivals: list[Arrival] = []
     for visits in (payload.get("visits") or {}).values():
         for visit in visits or []:
+            cancelled = str(visit.get("status") or "").lower() in CANCELLED_STATUSES
+            departed = parse_dt(visit.get("departed"))
             eta = parse_dt(visit.get("eta"))
-            if eta is None:
+            # ביטול בלי ETA נשמר כסימון, בזמן היציאה מהמוצא ובלי is_realtime:
+            # המיזוג מצמיד אותו לשורת לוח הזמנים שלו, או משמיט אותו.
+            when = eta if eta is not None else (departed if cancelled else None)
+            if when is None:
                 continue
             route = ((visit.get("static_info") or {}).get("route")) or {}
             location = visit.get("location") or {}
+            destination_id = str(visit.get("destination_id") or "")
             arrivals.append(
                 Arrival(
                     line_name=str(visit.get("line_name") or "?"),
-                    eta=eta,
-                    is_realtime=True,
+                    eta=when,
+                    is_realtime=eta is not None,
                     destination=(route.get("destination") or {}).get("name"),
                     operator=(route.get("agency") or {}).get("name"),
                     line_ref=str(visit["line_id"]) if visit.get("line_id") else None,
                     vehicle_ref=visit.get("vehicle_ref"),
                     vehicle_lat=_as_float(location.get("lat")),
                     vehicle_lon=_as_float(location.get("lon")),
-                    departed=parse_dt(visit.get("departed")),
+                    departed=departed,
                     vehicle_seen=parse_dt(visit.get("timestamp")),
+                    cancelled=cancelled,
+                    operator_id=str(visit["operator_id"])
+                    if visit.get("operator_id")
+                    else None,
+                    dest_code=int(destination_id) if destination_id.isdigit() else None,
                 )
             )
 
     arrivals.sort(key=lambda a: a.eta)
-    return stop, arrivals[:MAX_ARRIVALS]
+    return stop, _without_duplicates(arrivals)[:MAX_ARRIVALS]
+
+
+# שני ביקורים של אותה נסיעה בהפרש קטן מזה הם אותו ביקור שדווח פעמיים.
+_DUPLICATE_WINDOW: Final = timedelta(minutes=2)
+
+
+def _without_duplicates(arrivals: list[Arrival]) -> list[Arrival]:
+    """מסיר ביקור שדווח פעמיים, למשל כשאוטובוס הוחלף באמצע הנסיעה.
+
+    אותו קו ואותה יציאה מהמוצא עם ETA רחוק יותר הם ביקור שני אמיתי, כמו קו מעגלי
+    שעובר בתחנה בתחילת הנסיעה ובסופה, ונשארים. מבין הכפולים נשאר העדכני.
+    """
+    kept: list[Arrival] = []
+    for arrival in arrivals:
+        twin = next(
+            (
+                other
+                for other in kept
+                if arrival.departed is not None
+                and other.line_ref == arrival.line_ref
+                and other.departed == arrival.departed
+                and abs(other.eta - arrival.eta) < _DUPLICATE_WINDOW
+            ),
+            None,
+        )
+        if twin is None:
+            kept.append(arrival)
+        elif _seen(arrival) > _seen(twin):
+            kept[kept.index(twin)] = arrival
+    return kept
+
+
+def _seen(arrival: Arrival) -> float:
+    return arrival.vehicle_seen.timestamp() if arrival.vehicle_seen else 0.0
 
 
 class CurlbusClient:
@@ -311,6 +407,24 @@ class CurlbusClient:
         self._session = session
         # קוד תחנה -> (מספר כישלונות רצופים, מתי מותר לנסות שוב).
         self._failures: dict[int, tuple[int, float]] = {}
+        # מתי יצאו, או ייצאו, הבקשות האחרונות, ועד מתי curlbus ביקש שלא נשאל.
+        self._sent: deque[float] = deque(maxlen=CURLBUS_BURST)
+        self._blocked_until = 0.0
+
+    async def _wait_for_slot(self, stop_code: int) -> None:
+        """ממתין לתור בחלון של curlbus, או זורק כשהתור ארוך מ-CURLBUS_MAX_WAIT."""
+        now = monotonic()
+        start = max(now, self._blocked_until)
+        if len(self._sent) == CURLBUS_BURST:
+            start = max(start, self._sent[0] + CURLBUS_WINDOW)
+        if start - now > CURLBUS_MAX_WAIT:
+            raise RealtimeUnavailable(
+                f"curlbus is rate limiting; skipped stop {stop_code} this round"
+            )
+        # נרשם לפני ההמתנה ובלי await באמצע, כדי שקריאות מקבילות יקבלו תורות שונים.
+        self._sent.append(start)
+        if start > now:
+            await asyncio.sleep(start - now)
 
     def _retry_after(self, stop_code: int) -> float:
         """כמה שניות נותרו עד שמותר לשאול שוב על התחנה הזו. 0 אם מותר עכשיו."""
@@ -337,14 +451,25 @@ class CurlbusClient:
             raise RealtimeUnavailable(
                 f"curlbus has no data for stop {stop_code}; retrying in {int(wait)}s"
             )
+        try:
+            return await self._fetch(stop_code)
+        except RateLimited:
+            # פעם אחת, אחרי ה-Retry-After: חסימה של 10 שניות לא שווה סבב בלי זמן אמת.
+            return await self._fetch(stop_code)
 
+    async def _fetch(self, stop_code: int) -> tuple[Stop | None, list[Arrival]]:
+        await self._wait_for_slot(stop_code)
         headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
         try:
             async with self._session.get(
                 f"{CURLBUS_BASE}/{stop_code}",
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=25),
+                timeout=aiohttp.ClientTimeout(total=CURLBUS_TIMEOUT),
             ) as response:
+                if response.status == 429:
+                    retry = _retry_after_header(response.headers.get("Retry-After"))
+                    self._blocked_until = max(self._blocked_until, monotonic() + retry)
+                    raise RateLimited(f"curlbus HTTP 429 for stop {stop_code}")
                 # Seen in the wild: HTTP 500 with a plain-text body for stop
                 # codes curlbus does not know, so check both the status and the
                 # content type before trusting the body.
@@ -364,9 +489,11 @@ class CurlbusClient:
         except (TimeoutError, aiohttp.ClientError) as err:
             self._note_failure(stop_code)
             raise RealtimeUnavailable(f"curlbus unreachable: {err}") from err
-        except ValueError as err:
+        except (ValueError, TypeError, AttributeError, KeyError) as err:
             self._note_failure(stop_code)
             raise RealtimeUnavailable(f"curlbus sent malformed JSON: {err}") from err
+        except RateLimited:
+            raise
         except IsraelTransitError:
             # RealtimeUnavailable מלמעלה, ו-InvalidStop מהפענוח: שניהם תשובה
             # שלילית על התחנה הזו, ושניהם ראויים להאטה.
@@ -382,44 +509,58 @@ class CurlbusClient:
 # ---------------------------------------------------------------------------
 
 
-def parse_rail(payload: dict[str, Any]) -> list[Arrival]:
-    """Turn a searchTrain response into arrivals carrying real delays."""
-    result = (payload or {}).get("result") or {}
+def parse_rail(payload: Any) -> list[Arrival]:
+    """Turn a searchTrain response into arrivals carrying real delays.
+
+    לא זורק לעולם: זו העשרה בלבד, ונסיעה עם שדה משובש פשוט מדולגת.
+    """
+    result = payload.get("result") if isinstance(payload, dict) else None
+    travels = result.get("travels") if isinstance(result, dict) else None
     arrivals: list[Arrival] = []
-    for travel in result.get("travels") or []:
-        trains = travel.get("trains") or []
-        if not trains:
+    for travel in travels if isinstance(travels, list) else []:
+        try:
+            arrival = _rail_arrival(travel)
+        except (AttributeError, TypeError, ValueError, IndexError):
             continue
-        first = trains[0]
-        departure = parse_dt(travel.get("departureTime")) or parse_dt(
-            first.get("departureTime")
-        )
-        if departure is None:
-            continue
-        origin = first.get("orignStation")  # the API's own spelling
-        delay = next(
-            (
-                e.get("difMin")
-                for e in first.get("etaDiffTimes") or []
-                if e.get("stationId") == origin
-            ),
-            None,
-        )
-        destination_id = str(trains[-1].get("destinationStation") or "")
-        arrivals.append(
-            Arrival(
-                line_name=str(first.get("trainNumber") or "רכבת"),
-                eta=departure + timedelta(minutes=int(delay or 0)),
-                is_realtime=delay is not None,
-                destination=RAIL_STATIONS.get(destination_id, destination_id),
-                operator="רכבת ישראל",
-                route_type="2",
-                platform=str(first.get("originPlatform") or "") or None,
-                delay_minutes=int(delay) if delay is not None else None,
-            )
-        )
+        if arrival is not None:
+            arrivals.append(arrival)
     arrivals.sort(key=lambda a: a.eta)
     return arrivals
+
+
+def _rail_arrival(travel: dict[str, Any]) -> Arrival | None:
+    trains = travel.get("trains") or []
+    if not trains:
+        return None
+    first = trains[0]
+    departure = parse_dt(travel.get("departureTime")) or parse_dt(
+        first.get("departureTime")
+    )
+    if departure is None:
+        return None
+    origin = first.get("orignStation")  # the API's own spelling
+    delay = next(
+        (
+            _as_int(e.get("difMin"))
+            for e in first.get("etaDiffTimes") or []
+            if e.get("stationId") == origin
+        ),
+        None,
+    )
+    destination_id = str(trains[-1].get("destinationStation") or "")
+    train_number = normalize_train_number(first.get("trainNumber"))
+    return Arrival(
+        line_name=train_number or "רכבת",
+        eta=departure + timedelta(minutes=delay or 0),
+        is_realtime=delay is not None,
+        destination=RAIL_STATIONS.get(destination_id, destination_id),
+        operator="רכבת ישראל",
+        route_type="2",
+        platform=str(first.get("originPlatform") or "") or None,
+        delay_minutes=delay,
+        scheduled=departure,
+        train_number=train_number,
+    )
 
 
 class RailClient:
@@ -459,7 +600,7 @@ class RailClient:
                 f"{RAIL_BASE}/timetable/searchTrain",
                 json=body,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=RAIL_TIMEOUT),
             ) as response:
                 response.raise_for_status()
                 payload = await response.json(content_type=None)

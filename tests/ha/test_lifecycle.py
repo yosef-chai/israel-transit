@@ -16,8 +16,6 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.loader import async_get_integration
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-from pytest_homeassistant_custom_component.typing import WebSocketGenerator
 
 from custom_components.israel_transit import (
     _async_register_card,
@@ -39,6 +37,7 @@ from custom_components.israel_transit.const import (
     INTEGRATION_TITLE,
 )
 
+from .common import MockConfigEntry, WebSocketGenerator
 from .conftest import STOP, make_arrival, stop_device, stop_subentry
 
 RAIL_ROUTE = RouteInfo(
@@ -398,6 +397,8 @@ async def test_only_trains_reported_live_leave_the_timetable(
         is_realtime=True,
         route_type="2",
         delay_minutes=4,
+        scheduled=now + timedelta(minutes=12),
+        train_number="171",
     )
 
     config_entry.add_to_hass(hass)

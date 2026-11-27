@@ -11,7 +11,6 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import condition as condition_helper
 from homeassistant.helpers import service as service_helper
 from homeassistant.helpers import trigger as trigger_helper
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.israel_transit.api import IsraelTransitError
 from custom_components.israel_transit.const import (
@@ -21,6 +20,7 @@ from custom_components.israel_transit.const import (
     SERVICE_SEARCH_STOPS,
 )
 
+from .common import MockConfigEntry
 from .conftest import DANKAL, STOP, stop_device
 
 

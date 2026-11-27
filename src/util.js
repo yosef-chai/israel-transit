@@ -48,6 +48,21 @@ export const minutesUntil = (iso, now = Date.now()) => {
   return Math.max(0, Math.floor((target - now) / 60000));
 };
 
+/** עיכוב כטקסט: "+3" לאיחור, "−2" להקדמה, 0 לבזמן, null כשלא דווח. */
+export const formatDelay = (minutes) => {
+  if (minutes == null || !Number.isFinite(Number(minutes))) return null;
+  const value = Math.round(Number(minutes));
+  if (value === 0) return 0;
+  return value > 0 ? `+${value}` : `−${-value}`;
+};
+
+/** כמה דקות שלמות עברו מאז updated_at, לפי שעון השרת; null כשאין זמן. */
+export const dataAgeMinutes = (updatedAt, offset = 0, now = Date.now()) => {
+  const updated = Date.parse(updatedAt);
+  if (Number.isNaN(updated)) return null;
+  return Math.max(0, Math.floor((now + offset - updated) / 60000));
+};
+
 /**
  * Whether the user reads times on a 12-hour clock.
  *
@@ -87,6 +102,7 @@ export const formatClock = (iso, hass) => {
 // codes are the integration's own, plus the two Home Assistant itself sends.
 const ERROR_KEYS = {
   unknown_stop: "errorUnknownStop",
+  index_building: "errorIndexBuilding",
   unknown_command: "errorNotLoaded",
   search_failed: "errorIndex",
   lookup_failed: "errorIndex",

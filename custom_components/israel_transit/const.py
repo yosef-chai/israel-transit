@@ -25,6 +25,20 @@ GTFS_CHECK_INTERVAL_HOURS: Final = 24
 RAIL_BASE: Final = "https://rail-api.rail.co.il/rjpa/api/v1"
 RAIL_API_KEY: Final = "5e64d66cf03f4547bcac5de2de06b566"
 
+# בשניות. curlbus עונה בפחות משנייה ו-rail.co.il בכרבע שנייה (נמדד בנובמבר 2026),
+# ולכן מקור איטי לא מעכב את הלוח. rail הוא העשרה בלבד, ומקבל פחות.
+CURLBUS_TIMEOUT: Final = 10
+RAIL_TIMEOUT: Final = 5
+
+# curlbus יושב מאחורי Cloudflare: הבקשה השישית מאותה כתובת בתוך 10 שניות מקבלת
+# 429 עם Retry-After: 10, והכתובת חסומה עד אז (נמדד בנובמבר 2026). כל תחנה היא
+# coordinator עם טיימר משלו, והן יורות יחד, ולכן הבקשות מרווחות כאן, בבקשה אחת
+# פחות מהגבול.
+CURLBUS_BURST: Final = 4
+CURLBUS_WINDOW: Final = 10.0
+# תור ארוך מזה מוותר על זמן האמת לסבב הזה (מוצג לוח הזמנים) במקום לעכב אותו.
+CURLBUS_MAX_WAIT: Final = 30.0
+
 # Identifies us to the services we depend on, all of which are free and
 # community- or state-run. Note the deliberate spacing: the Stride API sits
 # behind a filter that answers 403 to any User-Agent containing the
@@ -43,6 +57,7 @@ CONF_QUERY: Final = "query"
 DATA_CLIENTS: Final = "clients"
 DATA_FRONTEND: Final = "frontend_registered"
 DATA_STOP_CACHE: Final = "stop_cache"
+DATA_STOP_IN_FLIGHT: Final = "stop_in_flight"
 
 # curlbus is a single free community service. 60s is the floor we ask of it.
 DEFAULT_SCAN_INTERVAL: Final = 60
@@ -68,6 +83,26 @@ DEPARTED_GRACE: Final = timedelta(seconds=60)
 # their timetabled departures are this close.
 RAIL_MATCH_WINDOW: Final = timedelta(minutes=1)
 
+# --- Matching live rows to the timetable ------------------------------------
+# לוח הזמנים נשלף גם אחורה, כדי שאוטובוס שמאחר עד שעה עדיין יזוהה כנסיעה שלו.
+TIMETABLE_LOOKBACK: Final = timedelta(minutes=60)
+# שורה חיה ושורת לוח זמנים הן אותה נסיעה כשהיציאה מהמוצא זהה עד כדי זה.
+ORIGIN_MATCH_WINDOW: Final = timedelta(seconds=60)
+# שורה חיה בלי זמן יציאה מהמוצא מוצמדת לשורה הקרובה באותו קו בטווח הזה,
+# אבל בלי לדווח עיכוב: ההתאמה לא מספיק בטוחה בשביל מספר.
+NEAREST_MATCH_WINDOW: Final = timedelta(minutes=10)
+
+# --- Index upkeep -----------------------------------------------------------
+# לוח זמנים שנגמר בעוד פחות מזה מקבל תקלה, כדי שלא יתרוקן בשקט.
+INDEX_COVERAGE_WARNING: Final = timedelta(days=3)
+# אחרי בנייה שנכשלה: הניסיון הבא בעוד 15 דק', שעה, 6 שעות, ואז פעם ביום.
+INDEX_RETRY_DELAYS: Final = (
+    timedelta(minutes=15),
+    timedelta(hours=1),
+    timedelta(hours=6),
+    timedelta(hours=24),
+)
+
 # --- Stops the dashboard asks about -----------------------------------------
 # תחנות שכרטיס שאל עליהן נכנסות לאינדקס כמו תחנות מוגדרות. הגג והתיישנות שומרים
 # על הרשימה קטנה, כי כל תחנה בה מוסיפה שורות לוח זמנים לכל בנייה של האינדקס.
@@ -86,9 +121,6 @@ TIMETABLE_REQUEST_COOLDOWN: Final = 1800.0
 REALTIME_FAILURES_BEFORE_BACKOFF: Final = 3
 REALTIME_BACKOFF_BASE: Final = 60.0
 REALTIME_BACKOFF_MAX: Final = 600.0
-# Every watched bus stop without real-time for this long is an outage of the
-# service, worth a repair issue rather than just a quieter board.
-REALTIME_OUTAGE_ISSUE_AFTER: Final = 1800.0
 
 # --- GTFS route types -------------------------------------------------------
 # https://gtfs.org/schedule/reference/#routestxt
@@ -99,11 +131,12 @@ ROUTE_TYPE_CABLE_TRAM: Final = "5"  # Rakevelit (Cable Express), Carmelit
 ROUTE_TYPE_SHERUT: Final = "8"  # shared taxi
 ROUTE_TYPE_FLEXIBLE: Final = "715"  # demand-responsive
 
-# Verified 2026-08-30 against the live feeds: only these report to SIRI.
-# Light rail, cable tram and rail return no real-time visits at all, so their
-# arrivals come from the GTFS timetable and are labelled as such in the card.
+# הסוגים שמשרד התחבורה מצהיר שהם ב-SIRI: אוטובוסים, מוניות שירות ורכבת ישראל
+# (gov.il, דף זמן אמת למפתחים, 05.2025; ובדיקה חיה ב-27.11.2026). הקו האדום
+# בתל אביב מופיע ב-SIRI בפועל, אבל רכבת קלה בכלל לא מוצהרת, ולכן זמן אמת שלה
+# מסומן לכל שורה דרך is_realtime ולא לפי סוג.
 REALTIME_ROUTE_TYPES: Final = frozenset(
-    {ROUTE_TYPE_BUS, ROUTE_TYPE_SHERUT, ROUTE_TYPE_FLEXIBLE}
+    {ROUTE_TYPE_BUS, ROUTE_TYPE_RAIL, ROUTE_TYPE_SHERUT, ROUTE_TYPE_FLEXIBLE}
 )
 
 # Everything SIRI does not carry, and which therefore needs a stored
@@ -133,7 +166,7 @@ SERVICE_GET_ARRIVALS: Final = "get_arrivals"
 
 # --- Repairs ----------------------------------------------------------------
 ISSUE_INDEX_FAILED: Final = "gtfs_index_failed"
-ISSUE_REALTIME_UNAVAILABLE: Final = "realtime_unavailable"
+ISSUE_INDEX_STALE: Final = "gtfs_index_stale"
 
 # --- Automations ------------------------------------------------------------
 SERVICE_REFRESH_STOP: Final = "refresh_stop"

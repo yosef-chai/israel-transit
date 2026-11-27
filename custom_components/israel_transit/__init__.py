@@ -54,7 +54,7 @@ from .const import (
     DOMAIN,
     GTFS_CHECK_INTERVAL_HOURS,
     ISSUE_INDEX_FAILED,
-    ISSUE_REALTIME_UNAVAILABLE,
+    ISSUE_INDEX_STALE,
     SERVICE_GET_ARRIVALS,
     SERVICE_REBUILD_TIMETABLE,
     SERVICE_REFRESH_STOP,
@@ -65,10 +65,10 @@ from .coordinator import (
     Clients,
     IsraelTransitConfigEntry,
     IsraelTransitCoordinator,
-    async_fetch_stop,
     async_find_coordinator,
 )
 from .websocket_api import async_register as async_register_websocket
+from .websocket_api import async_stop_board
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Delete the local index once the last stop is removed."""
     if hass.config_entries.async_entries(DOMAIN):
         return
-    for issue_id in (ISSUE_INDEX_FAILED, ISSUE_REALTIME_UNAVAILABLE):
+    for issue_id in (ISSUE_INDEX_FAILED, ISSUE_INDEX_STALE):
         ir.async_delete_issue(hass, DOMAIN, issue_id)
     clients: Clients | None = hass.data.get(DOMAIN, {}).get(DATA_CLIENTS)
     if clients is None:
@@ -254,10 +254,10 @@ def _async_register_actions(hass: HomeAssistant) -> None:
         stop_code: int = call.data[CONF_STOP_CODE]
         clients.async_note_stop(stop_code)
         try:
-            data = await async_fetch_stop(
-                clients,
-                stop_code,
-                rail_destination=call.data.get(CONF_RAIL_DESTINATION),
+            # דרך ה-coordinator והמטמון, כמו הכרטיס: אוטומציה שרצה כל דקה לא
+            # צריכה לפנות ל-curlbus מעבר למה שכבר נשלף.
+            data = await async_stop_board(
+                hass, stop_code, call.data.get(CONF_RAIL_DESTINATION)
             )
         except IsraelTransitError as err:
             placeholders = {"stop_code": str(stop_code), "error": str(err)}

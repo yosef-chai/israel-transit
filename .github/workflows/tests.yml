@@ -50,15 +50,16 @@ jobs:
           # הגרסה המינימלית מ-hacs.json; מעדכנים יחד איתה
           - name: Home Assistant 2026.7.0
             harness: pytest-homeassistant-custom-component==0.13.344
+          # החבילה הרשמית של HA, שיוצאת יחד עם core מ-2026.11
           - name: Home Assistant latest
-            harness: pytest-homeassistant-custom-component
+            harness: pytest-homeassistant pytest-cov
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
-      - run: pip install "${{ matrix.harness }}"
+      - run: pip install ${{ matrix.harness }}
       # python -m puts the repository on sys.path, where -p finds win_posix_shim
       - run: python -m pytest -c pytest-ha.ini -q --cov=custom_components.israel_transit --cov-report=term-missing
 
@@ -72,7 +73,7 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - name: Map geometry
+      - name: Card logic
         run: node --test "tests/js/*.test.mjs"
       - run: npm run build
       - name: The committed bundle matches the sources

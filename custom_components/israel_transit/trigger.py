@@ -39,8 +39,8 @@ from homeassistant.helpers.trigger import (
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
-from .api import Arrival, localized, minutes_until
-from .automation_helpers import async_resolve_stops
+from .api import Arrival, localized
+from .automation_helpers import async_resolve_stops, async_track_stops
 from .const import (
     CONF_LINE,
     CONF_MIN_DELAY,
@@ -66,6 +66,8 @@ OFFSET_TYPE_AFTER = "after"
 # The same vehicle can come round again on its next run an hour or two later,
 # so a shared vehicle_ref only means the same trip within this window.
 _VEHICLE_MATCH_WINDOW = timedelta(minutes=30)
+# שתי שורות שזוהו בלוח הזמנים הן אותה נסיעה כשהזמן המתוכנן שלהן זהה.
+_SCHEDULE_MATCH_WINDOW = timedelta(seconds=60)
 
 _LINE = vol.Any(None, cv.string)
 
@@ -121,6 +123,15 @@ class _Trip:
         if stop_code != self.stop_code:
             return False
         mine = self.arrival
+        if (
+            mine.scheduled is not None
+            and other.scheduled is not None
+            and mine.line_ref is not None
+            and mine.line_ref == other.line_ref
+        ):
+            # שתי השורות זוהו בלוח הזמנים: אותה נסיעה בדיוק, גם אם האוטובוס
+            # סטה מהזמן שלו ביותר מכמה דקות.
+            return abs(other.scheduled - mine.scheduled) <= _SCHEDULE_MATCH_WINDOW
         gap = abs(other.eta - mine.eta)
         if mine.vehicle_ref and other.vehicle_ref:
             return (
@@ -154,27 +165,35 @@ class _StopRunner:
         self.ids = count()
         # Trips already fired for, and when, so that none fires twice.
         self.fired: dict[int, tuple[_Trip, datetime]] = {}
-        self._unsubs: list[CALLBACK_TYPE] = []
+        self._unsubs: dict[int, CALLBACK_TYPE] = {}
 
     @callback
     def async_start(self) -> None:
-        for code in self.stop_codes:
-            self._unsubs.append(
-                async_dispatcher_connect(
-                    self.hass,
-                    signal_stop_updated(code),
-                    self._async_handle_update,
-                )
+        self._async_follow(set(self.stop_codes))
+
+    @callback
+    def async_set_stops(self, stop_codes: set[int]) -> None:
+        """התחנות של ה-target השתנו: מצטרפים לחדשות ומפסיקים לעקוב אחרי שנעלמו."""
+        for code in set(self._unsubs) - stop_codes:
+            self._unsubs.pop(code)()
+        self.stop_codes = set(stop_codes)
+        self._async_follow(stop_codes - set(self._unsubs))
+
+    @callback
+    def _async_follow(self, codes: set[int]) -> None:
+        for code in codes:
+            self._unsubs[code] = async_dispatcher_connect(
+                self.hass, signal_stop_updated(code), self._async_handle_update
             )
         now = dt_util.utcnow()
-        for code in self.stop_codes:
+        for code in codes:
             if (coordinator := async_find_coordinator(self.hass, code)) is not None:
                 self.async_evaluate(coordinator, now, initial=True)
 
     @callback
     def async_stop(self) -> None:
         while self._unsubs:
-            self._unsubs.pop()()
+            self._unsubs.popitem()[1]()
         self.fired.clear()
 
     @callback
@@ -188,10 +207,11 @@ class _StopRunner:
         data: StopData | None = coordinator.data
         if data is None:
             return []
+        # נסיעה מבוטלת לא מגיעה. אם חיכינו לה, היא נעלמת מהלוח ולכן גם מהמעקב.
         return [
             a
             for a in data.upcoming(now)
-            if self.line is None or a.line_name == self.line
+            if not a.cancelled and (self.line is None or a.line_name == self.line)
         ]
 
     @staticmethod
@@ -234,6 +254,9 @@ class _StopRunner:
         self.fired[next(self.ids)] = (trip, now)
         a = trip.arrival
         lang = self.hass.config.language
+        # נמדד מהרגע שבו הטריגר היה אמור לירות, ומעוגל: טיימר שהתעורר אחרי כמה
+        # מילישניות לא הופך "5 דקות לפני" ל-4. נסיעה שהופיעה מאוחר נמדדת מעכשיו.
+        moment = max(now, trip.fire_at)
         self.run_action(
             {
                 "stop_code": trip.stop_code,
@@ -242,11 +265,13 @@ class _StopRunner:
                 "destination": localized(a.destination, lang) or None,
                 "operator": localized(a.operator, lang) or None,
                 "eta": a.eta,
-                "minutes": minutes_until(a.eta, now),
+                "minutes": max(0, round((a.eta - moment).total_seconds() / 60)),
                 "is_realtime": a.is_realtime,
                 "vehicle_ref": a.vehicle_ref,
                 "platform": a.platform,
                 "delay_minutes": a.delay_minutes,
+                "scheduled": a.scheduled,
+                "train_number": a.train_number,
             },
             description,
         )
@@ -441,7 +466,18 @@ class _StopTrigger(Trigger):
             )
         runner = self._make_runner(stop_codes, run_action, did_not_trigger)
         runner.async_start()
-        return runner.async_stop
+        # תחנה שנכנסת לאזור או לתווית של ה-target, או יוצאת מהם, נכנסת למעקב
+        # או יוצאת ממנו בלי להפעיל את האוטומציה מחדש.
+        untrack = await async_track_stops(
+            self._hass, self._target, runner.async_set_stops
+        )
+
+        @callback
+        def _async_detach() -> None:
+            untrack()
+            runner.async_stop()
+
+        return _async_detach
 
 
 class ArrivalTrigger(_StopTrigger):

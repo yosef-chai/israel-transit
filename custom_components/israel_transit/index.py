@@ -13,20 +13,29 @@ import asyncio
 import logging
 import shutil
 import sqlite3
-import tempfile
 import threading
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_call_later
 
 from .api import ISRAEL_TZ, Arrival, RouteInfo, RouteStop, Stop
-from .const import DOMAIN, GTFS_DB_FILENAME, ISSUE_INDEX_FAILED
+from .const import (
+    DOMAIN,
+    GTFS_DB_FILENAME,
+    INDEX_COVERAGE_WARNING,
+    INDEX_RETRY_DELAYS,
+    ISSUE_INDEX_FAILED,
+    ISSUE_INDEX_STALE,
+    TIMETABLE_LOOKBACK,
+)
 from .gtfs import (
+    CALENDAR_MEMBERS,
     MEMBERS,
     OPTIONAL_MEMBERS,
     SCHEMA_VERSION,
@@ -44,6 +53,8 @@ from .gtfs import (
     search_stops,
     stage_index,
     stored_built,
+    stored_coverage_end,
+    stored_max_sec,
     stored_schema,
     stored_stop_codes,
     stored_version,
@@ -64,6 +75,9 @@ class GtfsIndex:
         self._hass = hass
         self._downloader = GtfsDownloader(async_get_clientsession(hass))
         self._db_path = Path(hass.config.path(DOMAIN)) / GTFS_DB_FILENAME
+        # ההורדה (100–200MB) נשמרת ליד האינדקס ולא ב-/tmp, שבחלק מההתקנות יושב
+        # ב-RAM או במחיצה קטנה.
+        self._download_dir = self._db_path.parent / ".download"
         self._connection: sqlite3.Connection | None = None
         self._building = False
         self._lock = asyncio.Lock()
@@ -76,6 +90,11 @@ class GtfsIndex:
         # אינדקס מסכמה ישנה אך קריאה נשאר פתוח, ורק מסומן לבנייה מחדש.
         self._schema_current = False
         self._built: str | None = None
+        self._coverage_end: date | None = None
+        self._max_sec: int | None = None
+        # ניסיון חוזר אחרי בנייה שנכשלה, בהמתנה שגדלה; מתאפס בהצלחה.
+        self._failures = 0
+        self._retry: CALLBACK_TYPE | None = None
         self.last_build: dict[str, int] | None = None
         self.last_error: str | None = None
 
@@ -107,10 +126,17 @@ class GtfsIndex:
     def db_path(self) -> Path:
         return self._db_path
 
+    @property
+    def coverage_end(self) -> date | None:
+        """היום האחרון שיש לו שירות באינדקס הפתוח."""
+        return self._coverage_end
+
     # -- lifecycle ----------------------------------------------------------
 
     async def async_load(self) -> bool:
         """Open an existing index, if there is one and it is still readable."""
+        # הורדה מבנייה שקרסה באמצע לא תשמש אף אחד, ותופסת מאות MB.
+        await self._hass.async_add_executor_job(shutil.rmtree, self._download_dir, True)
         try:
             connection = await self._hass.async_add_executor_job(self._open_existing)
             if connection is None:
@@ -134,20 +160,78 @@ class GtfsIndex:
         if not self._schema_current:
             # Still answers every query; the next refresh replaces it.
             _LOGGER.info("GTFS index predates this version; rebuilding")
-        self._indexed_stops, self._built = await self._hass.async_add_executor_job(
+        (
+            self._indexed_stops,
+            self._built,
+            self._coverage_end,
+            self._max_sec,
+        ) = await self._hass.async_add_executor_job(
             self._locked, self._loaded_state, self._connection
         )
+        self.async_check_coverage()
         return True
 
     @staticmethod
     def _loaded_state(
         connection: sqlite3.Connection,
-    ) -> tuple[frozenset[int], str | None]:
-        return stored_stop_codes(connection), stored_built(connection)
+    ) -> tuple[frozenset[int], str | None, date | None, int | None]:
+        return (
+            stored_stop_codes(connection),
+            stored_built(connection),
+            stored_coverage_end(connection),
+            stored_max_sec(connection),
+        )
+
+    @callback
+    def async_check_coverage(self, today: date | None = None) -> None:
+        """פותח תקלה כשלוח הזמנים הפתוח עומד להיגמר, ומוחק אותה כשהוא תקין.
+
+        רץ בטעינה, בכל בדיקה יומית ובסוף כל בנייה, ולא רק כשבנייה נכשלת: אם משרד
+        התחבורה יפסיק לעדכן את הקובץ, ה-ETag לא ישתנה ושום בנייה לא תנוסה.
+        """
+        if self._coverage_end is None:
+            return
+        today = today or datetime.now(ISRAEL_TZ).date()
+        if self._coverage_end < today + INDEX_COVERAGE_WARNING:
+            ir.async_create_issue(
+                self._hass,
+                DOMAIN,
+                ISSUE_INDEX_STALE,
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_INDEX_STALE,
+                translation_placeholders={"date": self._coverage_end.isoformat()},
+                # דיאלוג התיקון מציג את התאריך, והוא מקבל רק את data של התקלה.
+                data={"date": self._coverage_end.isoformat()},
+            )
+        else:
+            ir.async_delete_issue(self._hass, DOMAIN, ISSUE_INDEX_STALE)
+
+    @callback
+    def async_cancel_retry(self) -> None:
+        if self._retry is not None:
+            self._retry()
+            self._retry = None
+
+    @callback
+    def _async_schedule_retry(self, stop_codes: StopCodes) -> None:
+        """בנייה שנכשלה מנוסה שוב בעוד 15 דק', שעה, 6 שעות, ואז פעם ביום."""
+        self.async_cancel_retry()
+        delay = INDEX_RETRY_DELAYS[min(self._failures, len(INDEX_RETRY_DELAYS)) - 1]
+
+        @callback
+        def _async_retry(_now: Any) -> None:
+            self._retry = None
+            self.async_schedule_refresh(stop_codes)
+
+        _LOGGER.info("Retrying the GTFS index in %s", delay)
+        self._retry = async_call_later(self._hass, delay, _async_retry)
 
     async def async_close(self) -> None:
         self._indexed_stops = frozenset()
         self._built = None
+        self._coverage_end = None
+        self._max_sec = None
         if self._connection is not None:
             connection, self._connection = self._connection, None
             await self._hass.async_add_executor_job(self._locked, connection.close)
@@ -197,7 +281,15 @@ class GtfsIndex:
         """
         async with self._lock:
             wanted = stop_codes() if callable(stop_codes) else stop_codes
-            return await self._async_refresh(wanted, force)
+            rebuilt = await self._async_refresh(wanted, force)
+            if self.last_error is None:
+                self._failures = 0
+                self.async_cancel_retry()
+            else:
+                self._failures += 1
+                self._async_schedule_retry(stop_codes)
+            self.async_check_coverage()
+            return rebuilt
 
     async def _async_refresh(self, stop_codes: frozenset[int], force: bool) -> bool:
         self._building = True
@@ -210,6 +302,7 @@ class GtfsIndex:
                 missing = stop_codes - indexed
                 if current == version.token and not missing and self._schema_current:
                     _LOGGER.debug("GTFS feed unchanged (%s)", version.token)
+                    self.last_error = None
                     return False
                 if missing:
                     _LOGGER.info(
@@ -257,14 +350,15 @@ class GtfsIndex:
     ) -> None:
         members = await self._downloader.async_members(version.size)
         missing = [name for name in MEMBERS if name not in members]
+        if not any(name in members for name in CALENDAR_MEMBERS):
+            missing.append(" or ".join(CALENDAR_MEMBERS))
         if missing:
             raise GtfsError(f"GTFS feed is missing {', '.join(missing)}")
         wanted = [*MEMBERS, *(name for name in OPTIONAL_MEMBERS if name in members)]
 
-        workdir = Path(
-            await self._hass.async_add_executor_job(
-                tempfile.mkdtemp, None, f"{DOMAIN}-"
-            )
+        workdir = self._download_dir
+        await self._hass.async_add_executor_job(
+            lambda: workdir.mkdir(parents=True, exist_ok=True)
         )
         try:
             files: dict[str, Path] = {}
@@ -338,7 +432,18 @@ class GtfsIndex:
         return await self._query(route_shape, int(route_id))
 
     async def async_departures(
-        self, code: int, now: datetime | None = None, hours: int = 3
+        self,
+        code: int,
+        now: datetime | None = None,
+        hours: int = 3,
+        lookback: timedelta = TIMETABLE_LOOKBACK,
     ) -> list[Arrival]:
+        """לוח הזמנים מ-``lookback`` אחורה, כדי שגם נסיעה באיחור תזוהה."""
         moment = (now or datetime.now(ISRAEL_TZ)).astimezone(ISRAEL_TZ)
-        return await self._query(scheduled_arrivals, int(code), moment, hours)
+        return await self._query(
+            scheduled_arrivals,
+            int(code),
+            moment - lookback,
+            moment + timedelta(hours=hours),
+            self._max_sec,
+        )

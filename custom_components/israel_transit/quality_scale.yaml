@@ -6,7 +6,9 @@ rules:
     comment: >-
       60 s by default with a 30 s floor, because the real-time source is a single
       free community service. Several open dashboards still produce one upstream
-      request per interval, and the timetable is a local SQLite read.
+      request per interval, and the timetable is a local SQLite read. curlbus
+      blocks an address for ten seconds after its sixth request in ten seconds,
+      so the client paces itself to four, and honours Retry-After once.
   brands:
     status: done
     comment: >-
@@ -82,7 +84,8 @@ rules:
       DataUpdateCoordinator logs the transition in both directions once. Losing
       real-time is not unavailability -- the board falls back to the local
       timetable -- so the coordinator logs that separately, once when it is
-      lost and once when it is back, per stop.
+      lost and once when it is back, per stop. It raises no repair issue, since
+      there is nothing for the user to do about it.
   parallel-updates: done
   reauthentication-flow:
     status: exempt
@@ -92,7 +95,7 @@ rules:
   test-coverage:
     status: done
     comment: >-
-      95% over 250 tests. The Home Assistant level tests run against a real
+      96% over 352 tests. The Home Assistant level tests run against a real
       instance, the triggers and conditions inside real automations; the
       parsing, GTFS indexing and download tests need nothing but aiohttp and
       build a real index from a miniature feed.
@@ -127,11 +130,17 @@ rules:
   entity-disabled-by-default:
     status: exempt
     comment: >-
-      A stop creates three entities plus two per line the user explicitly chose
+      A stop creates two entities plus one per line the user explicitly chose
       to track, so there is nothing noisy to hide.
   entity-translations: done
   exception-translations: done
-  icon-translations: done
+  icon-translations:
+    status: exempt
+    comment: >-
+      Every entity has a default icon in icons.json. The next-arrival sensors
+      also follow the mode of the vehicle they show -- bus, tram, train, cable
+      car -- which is neither their state nor fixed, so icons.json cannot
+      express it.
   reconfiguration-flow:
     status: done
     comment: >-
@@ -140,11 +149,11 @@ rules:
   repair-issues:
     status: done
     comment: >-
-      Two, both actionable. A timetable that cannot be built -- which silently
-      removes light rail, the cable lines and trains -- is fixable: its flow
-      rebuilds the index with progress, and stays open with the error if the
-      rebuild fails. Every bus stop without real-time for half an hour says the
-      board is a timetable for now, and clears itself once real-time returns.
+      Two, both actionable and fixable by rebuilding the index from the issue,
+      with progress, staying open with the error if the rebuild fails: a
+      timetable that cannot be built, and one that runs out within three days
+      because no newer feed was published. A real-time outage raises nothing,
+      since there is nothing to do about it; it is logged once each way.
   stale-devices:
     status: done
     comment: >-
@@ -154,11 +163,11 @@ rules:
 
   # --- Platinum -------------------------------------------------------------
   async-dependency:
-    status: done
+    status: exempt
     comment: >-
-      There is no external dependency. All I/O is aiohttp; the CPU-bound GTFS
-      parse and the SQLite reads run in the executor so the event loop is never
-      blocked.
+      There is no external dependency, which the rule says it then does not
+      apply to. All I/O is aiohttp; the CPU-bound GTFS parse and the SQLite
+      reads run in the executor so the event loop is never blocked.
   inject-websession:
     status: done
     comment: >-

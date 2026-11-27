@@ -23,6 +23,7 @@ from custom_components.israel_transit.const import (
     DOMAIN,
     GTFS_DB_FILENAME,
     ISSUE_INDEX_FAILED,
+    ISSUE_INDEX_STALE,
 )
 from custom_components.israel_transit.gtfs import (
     MEMBERS,
@@ -35,6 +36,22 @@ from custom_components.israel_transit.gtfs import (
 from custom_components.israel_transit.index import GtfsIndex
 
 IL = timezone(timedelta(hours=3))
+
+
+@pytest.fixture(autouse=True)
+def _cancel_index_retries(hass: HomeAssistant):
+    """בנייה שנכשלה קובעת ניסיון חוזר. בהתקנה הוא מבוטל בפריקה, כאן בסוף הטסט."""
+    created: list[GtfsIndex] = []
+    original = GtfsIndex.__init__
+
+    def init(self: GtfsIndex, hass: HomeAssistant) -> None:
+        original(self, hass)
+        created.append(self)
+
+    with patch.object(GtfsIndex, "__init__", init):
+        yield
+    for index in created:
+        index.async_cancel_retry()
 
 
 @pytest.fixture
@@ -285,6 +302,7 @@ async def test_a_full_refresh_downloads_the_members_and_builds_the_index(
     members = {
         name: ZipMember(name, feed[name].stat().st_size, 0, 0)
         for name in (*MEMBERS, *OPTIONAL_MEMBERS)
+        if name in feed
     }
     fetched: list[str] = []
 
@@ -306,7 +324,8 @@ async def test_a_full_refresh_downloads_the_members_and_builds_the_index(
         index._downloader.async_version.return_value.size = 1234
         assert await index.async_refresh(frozenset({21023})) is True
 
-    assert sorted(fetched) == sorted((*MEMBERS, *OPTIONAL_MEMBERS))
+    # The fixture is in the current format, so it has no calendar_dates.txt.
+    assert sorted(fetched) == sorted(members)
     assert index.available is True
     assert index.last_build is not None
     assert index.last_build["stops"] == 4
@@ -328,7 +347,8 @@ async def test_a_feed_without_the_optional_members_still_builds(
     index.db_path.unlink(missing_ok=True)
     feed = write_feed(tmp_path, {"shapes.txt": None})
     members = {
-        name: ZipMember(name, feed[name].stat().st_size, 0, 0) for name in MEMBERS
+        name: ZipMember(name, feed[name].stat().st_size, 0, 0)
+        for name in (*MEMBERS, "calendar.txt")
     }
 
     async def fake_fetch(member: ZipMember, target: Path) -> int:
@@ -376,6 +396,7 @@ async def test_a_schema_2_index_keeps_answering_until_it_is_rebuilt(
     members = {
         name: ZipMember(name, feed[name].stat().st_size, 0, 0)
         for name in (*MEMBERS, *OPTIONAL_MEMBERS)
+        if name in feed
     }
 
     async def fake_fetch(member: ZipMember, target: Path) -> int:
@@ -420,6 +441,76 @@ async def test_a_feed_missing_a_member_is_refused(
     assert index.last_error is not None
     assert "stop_times.txt" in index.last_error
     assert issue_registry.async_get_issue(DOMAIN, ISSUE_INDEX_FAILED) is not None
+
+
+# --- trying again after a failure, and a timetable running out --------------
+
+
+async def test_a_failed_build_is_retried_sooner_than_tomorrow(
+    hass: HomeAssistant,
+) -> None:
+    """15 דקות, שעה, 6 שעות, ואז פעם ביום; הצלחה מאפסת ומבטלת."""
+    index = GtfsIndex(hass)
+    index.db_path.unlink(missing_ok=True)
+    delays: list[timedelta] = []
+
+    def record(_hass: HomeAssistant, delay: timedelta, _action: object):
+        delays.append(delay)
+        return lambda: None
+
+    failing = AsyncMock(side_effect=GtfsError("feed unreachable"))
+    with (
+        patch("custom_components.israel_transit.index.async_call_later", record),
+        patch.object(index, "_downloader", **{"async_version": failing}),
+    ):
+        for _ in range(5):
+            await index.async_refresh(frozenset())
+        assert delays == [
+            timedelta(minutes=15),
+            timedelta(hours=1),
+            timedelta(hours=6),
+            timedelta(hours=24),
+            timedelta(hours=24),
+        ]
+
+        failing.side_effect = None
+        with patch.object(index, "_async_build", AsyncMock()):
+            await index.async_refresh(frozenset())
+    assert index._failures == 0
+    assert index._retry is None
+
+
+async def test_a_timetable_about_to_run_out_raises_an_issue_on_load(
+    built_index: GtfsIndex, issue_registry: ir.IssueRegistry
+) -> None:
+    """הבדיקה רצה גם בלי שום בנייה: אם הקובץ קפא, ה-ETag לא ישתנה לעולם."""
+    writable = sqlite3.connect(built_index.db_path)
+    stale = (datetime.now(IL).date() + timedelta(days=1)).strftime("%Y%m%d")
+    writable.execute("UPDATE meta SET value=? WHERE key='coverage_end'", (stale,))
+    writable.commit()
+    writable.close()
+
+    assert await built_index.async_load() is True
+
+    issue = issue_registry.async_get_issue(DOMAIN, ISSUE_INDEX_STALE)
+    assert issue is not None and issue.is_fixable is True
+    assert issue.data == {"date": built_index.coverage_end.isoformat()}
+
+    # The same check with a later "today" -- or a fresh build -- clears it.
+    built_index.async_check_coverage(today=datetime(2026, 1, 1).date())
+    assert issue_registry.async_get_issue(DOMAIN, ISSUE_INDEX_STALE) is None
+
+
+async def test_leftovers_of_an_interrupted_download_are_removed_on_load(
+    built_index: GtfsIndex,
+) -> None:
+    leftover = built_index.db_path.parent / ".download" / "stop_times.txt.deflate"
+    leftover.parent.mkdir(parents=True, exist_ok=True)
+    leftover.write_bytes(b"x" * 1024)
+
+    await built_index.async_load()
+
+    assert not leftover.parent.exists()
 
 
 @pytest.fixture
@@ -536,6 +627,7 @@ async def test_the_index_keeps_answering_while_a_rebuild_runs(
     members = {
         name: ZipMember(name, feed[name].stat().st_size, 0, 0)
         for name in (*MEMBERS, *OPTIONAL_MEMBERS)
+        if name in feed
     }
     staging = asyncio.Event()
     release = asyncio.Event()

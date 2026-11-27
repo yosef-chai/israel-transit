@@ -12,7 +12,6 @@ import pytest
 from homeassistant.config_entries import ConfigSubentryData
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.israel_transit.api import Arrival, RouteInfo, Stop
 from custom_components.israel_transit.const import (
@@ -22,6 +21,8 @@ from custom_components.israel_transit.const import (
     INTEGRATION_TITLE,
     SUBENTRY_TYPE_STOP,
 )
+
+from .common import MockConfigEntry
 
 StopCodes = frozenset[int] | Callable[[], frozenset[int]]
 

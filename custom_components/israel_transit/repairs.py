@@ -1,6 +1,7 @@
 """Repair flows: fixing what a repair issue reports, from the issue itself.
 
-Only the timetable issue has a fix the user can start -- rebuilding the index.
+Only the timetable issues have a fix the user can start -- rebuilding the index,
+whether the last build failed or the one in place is about to run out.
 The flow runs the build and reports its outcome: a build that fails sends the
 user back to the form with the error and leaves the issue open, rather than
 closing it on a confirmation that fixed nothing.
@@ -16,16 +17,18 @@ from homeassistant.components.repairs import RepairsFlow, RepairsFlowResult
 from homeassistant.core import HomeAssistant
 
 from .api import IsraelTransitError
-from .const import DATA_CLIENTS, DOMAIN, ISSUE_INDEX_FAILED
+from .const import DATA_CLIENTS, DOMAIN, ISSUE_INDEX_FAILED, ISSUE_INDEX_STALE
 from .coordinator import Clients
 
 
 class RebuildIndexRepairFlow(RepairsFlow):
     """Rebuild the GTFS index, showing progress while it downloads."""
 
-    def __init__(self) -> None:
+    def __init__(self, data: dict[str, Any] | None = None) -> None:
         self._task: asyncio.Task[None] | None = None
         self._error: str | None = None
+        # התאריך שבו לוח הזמנים נגמר, כשזו התקלה שנפתחה.
+        self._date = str((data or {}).get("date") or "")
 
     def _clients(self) -> Clients:
         clients: Clients = self.hass.data[DOMAIN][DATA_CLIENTS]
@@ -50,7 +53,7 @@ class RebuildIndexRepairFlow(RepairsFlow):
             step_id="confirm",
             data_schema=vol.Schema({}),
             errors=errors,
-            description_placeholders={"error": self._error or ""},
+            description_placeholders={"error": self._error or "", "date": self._date},
         )
 
     async def async_step_rebuild(
@@ -86,6 +89,6 @@ async def async_create_fix_flow(
     hass: HomeAssistant, issue_id: str, data: dict[str, Any] | None
 ) -> RepairsFlow:
     """Create the flow that fixes an issue."""
-    if issue_id != ISSUE_INDEX_FAILED:
+    if issue_id not in (ISSUE_INDEX_FAILED, ISSUE_INDEX_STALE):
         raise ValueError(f"Issue {issue_id} has no fix flow")
-    return RebuildIndexRepairFlow()
+    return RebuildIndexRepairFlow(data)

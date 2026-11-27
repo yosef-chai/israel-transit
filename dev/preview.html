@@ -112,6 +112,18 @@
         <h3>Dankal 35962 - curlbus 500, timetable from GTFS</h3>
         <israel-transit-card id="broken"></israel-transit-card>
       </div>
+      <div class="col">
+        <h3>Bus stop, real-time down (20092)</h3>
+        <israel-transit-card id="rt-down"></israel-transit-card>
+      </div>
+      <div class="col">
+        <h3>Board five minutes old (21024)</h3>
+        <israel-transit-card id="old"></israel-transit-card>
+      </div>
+      <div class="col">
+        <h3>Index still building (11111)</h3>
+        <israel-transit-card id="building"></israel-transit-card>
+      </div>
       <div class="col narrow">
         <h3>Narrow column, filtered to line 36</h3>
         <israel-transit-card id="narrow"></israel-transit-card>
@@ -175,34 +187,36 @@
           has_realtime: true,
           realtime_error: null,
           server_time: iso(0),
+          updated_at: iso(0),
           arrivals: [
             {
               line_name: "36", line_ref: "960", destination: "מסוף אור יהודה",
               operator: "מטרופולין", route_type: "3", is_realtime: true,
               eta: iso(0), vehicle_lat: 32.0739, vehicle_lon: 34.7837,
               vehicle_ref: "1001", vehicle_seen: iso(-0.5),
-              departed: iso(-22), platform: null, delay_minutes: null,
+              departed: iso(-22), platform: null, delay_minutes: 3, scheduled: iso(-3),
             },
             {
               line_name: "91", line_ref: "16352", destination: "מסוף הטייסים",
               operator: "מטרופולין", route_type: "3", is_realtime: true,
               eta: iso(4), vehicle_lat: 32.0652, vehicle_lon: 34.7768,
               vehicle_ref: "1002", vehicle_seen: iso(-0.3),
-              departed: iso(-14), platform: null, delay_minutes: null,
+              departed: iso(-14), platform: null, delay_minutes: -1, scheduled: iso(5),
             },
             {
               line_name: "480", line_ref: "7020", destination: "ירושלים",
               operator: "אגד", route_type: "3", is_realtime: true,
-              eta: iso(11), platform: null, delay_minutes: null,
+              eta: iso(11), platform: null, delay_minutes: 0, scheduled: iso(11),
             },
             {
               line_name: "142", line_ref: "812", destination: "רמת גן",
               operator: "דן", route_type: "3", is_realtime: true, eta: iso(19),
+              cancelled: true, scheduled: iso(19),
             },
             {
               line_name: "1", line_ref: "29950", destination: "נהריה",
               operator: "רכבת ישראל", route_type: "2", is_realtime: true,
-              eta: iso(26), platform: "3", delay_minutes: 4,
+              eta: iso(26), platform: "3", delay_minutes: 4, train_number: "6702",
             },
             {
               line_name: "5", line_ref: "1200", destination: "בת ים",
@@ -244,6 +258,22 @@
             { line_name: "2", destination: "פתח תקווה_קרית אריה", operator: "תבל", route_type: "0", has_realtime: false, line_ref: "34445" },
           ],
         },
+      };
+      // זמן אמת נפל בתחנת אוטובוס: לוח הזמנים מוצג עם באנר.
+      FIXTURES[20092] = {
+        ...FIXTURES[21023],
+        stop: { ...FIXTURES[21023].stop, code: 20092 },
+        has_realtime: false,
+        realtime_error: "curlbus HTTP 500 for stop 20092",
+        arrivals: FIXTURES[21023].arrivals.slice(2, 5).map((a) => ({
+          ...a, is_realtime: false, delay_minutes: null, cancelled: false,
+        })),
+      };
+      // השרת עונה, אבל הלוח לא התעדכן חמש דקות.
+      FIXTURES[21024] = {
+        ...FIXTURES[21023],
+        stop: { ...FIXTURES[21023].stop, code: 21024, name: "ת. רכבת השלום/הורדה" },
+        updated_at: iso(-5),
       };
 
       // The backend stores offsets from the start of a run and turns them into
@@ -293,6 +323,7 @@
         callWS: async (msg) => {
           await new Promise((r) => setTimeout(r, 60));
           if (msg.type.endsWith("/stop")) {
+            if (msg.stop_code === 11111) throw { code: "index_building", message: "building" };
             const data = FIXTURES[msg.stop_code];
             if (!data) throw new Error(`Unknown stop code ${msg.stop_code}`);
             return data;
@@ -321,6 +352,9 @@
       mount("bus", { stop_code: 21023 });
       mount("tram", { stop_code: 6185, max_arrivals: 4 });
       mount("broken", { stop_code: 35962 });
+      mount("rt-down", { stop_code: 20092 });
+      mount("old", { stop_code: 21024, max_arrivals: 3 });
+      mount("building", { stop_code: 11111 });
       mount("narrow", { stop_code: 21023, lines: ["36"], max_arrivals: 3 });
       mount("bare", {
         stop_code: 21023,

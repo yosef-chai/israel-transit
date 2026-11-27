@@ -1,13 +1,16 @@
 """Diagnostics for a configured stop.
 
 Nothing here is personal beyond the stop the user chose, which is a public bus
-stop code and is the one thing a support request needs.
+stop code and is the one thing a support request needs. Coordinates are
+redacted anyway: the diagnostics rule says they "must never" be included, and
+a stop near home plus a time of day says more than it should.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
 from .const import DATA_CLIENTS, DOMAIN
@@ -33,6 +36,7 @@ def _stop_diagnostics(
         "resolved": data.stop.as_dict() if data else None,
         "has_realtime": data.has_realtime if data else None,
         "realtime_error": data.realtime_error if data else None,
+        "updated_at": data.updated_at.isoformat() if data else None,
         # The arrivals themselves, since a wrong time is the usual report.
         "arrivals": [a.as_dict(hass.config.language) for a in data.arrivals]
         if data
@@ -48,7 +52,7 @@ async def async_get_config_entry_diagnostics(
     clients: Clients | None = hass.data.get(DOMAIN, {}).get(DATA_CLIENTS)
     index = clients.index if clients else None
 
-    return {
+    diagnostics = {
         "stops": [
             _stop_diagnostics(hass, coordinator)
             # Unset when the entry failed to load, which is when this is wanted.
@@ -59,8 +63,15 @@ async def async_get_config_entry_diagnostics(
             "path": str(index.db_path) if index else None,
             "last_build": index.last_build if index else None,
             "last_error": index.last_error if index else None,
+            "coverage_end": index.coverage_end.isoformat()
+            if index and index.coverage_end
+            else None,
             # התחנות שיש להן לוח זמנים מול אלה שמבקשים אותו: פער מסביר לוח ריק.
             "indexed_stops": sorted(index.indexed_stops) if index else [],
             "card_stops": sorted(clients.stops.codes) if clients else [],
         },
     }
+    return async_redact_data(diagnostics, TO_REDACT)
+
+
+TO_REDACT = {"lat", "lon", "vehicle_lat", "vehicle_lon"}

@@ -10,7 +10,6 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.israel_transit.api import IsraelTransitError
 from custom_components.israel_transit.const import (
@@ -23,6 +22,7 @@ from custom_components.israel_transit.diagnostics import (
     async_get_config_entry_diagnostics,
 )
 
+from .common import MockConfigEntry
 from .conftest import STOP, make_arrival
 
 
@@ -50,7 +50,6 @@ async def test_a_stop_becomes_a_device_with_its_sensors(
     hass: HomeAssistant, loaded_entry: MockConfigEntry
 ) -> None:
     timestamp = hass.states.get("sensor.t_rkbt_hshlvm_next_arrival")
-    minutes = hass.states.get("sensor.t_rkbt_hshlvm_next_arrival_in")
     if timestamp is None:  # entity ids are slugified from a Hebrew name
         candidates = [
             state
@@ -59,14 +58,17 @@ async def test_a_stop_becomes_a_device_with_its_sensors(
         ]
         assert candidates, "no next-arrival sensor was created"
         timestamp = candidates[0]
-        minutes = hass.states.get(f"{timestamp.entity_id}_in")
 
     assert timestamp.attributes["device_class"] == "timestamp"
     assert timestamp.attributes["line"] == "36"
     assert timestamp.attributes["is_realtime"] is True
-    assert minutes is not None
-    assert minutes.attributes["unit_of_measurement"] == "min"
-    assert int(minutes.state) in (2, 3)
+    # A duration "should only change when the device reports a new value, not
+    # because time passes" -- so there is no minutes-until sensor any more.
+    assert not [
+        state
+        for state in hass.states.async_all("sensor")
+        if state.attributes.get("device_class") == "duration"
+    ]
 
 
 async def test_tracked_lines_get_their_own_pair_of_sensors(
@@ -86,7 +88,41 @@ async def test_tracked_lines_get_their_own_pair_of_sensors(
         for state in hass.states.async_all("sensor")
         if "36" in (state.attributes.get("friendly_name") or "")
     ]
-    assert len(line_sensors) >= 2
+    assert [state.attributes["device_class"] for state in line_sensors] == ["timestamp"]
+
+
+async def test_an_upgrade_removes_the_old_minutes_sensors(
+    hass: HomeAssistant,
+    mock_index: AsyncMock,
+    mock_curlbus: AsyncMock,
+    mock_card_registration: None,
+    config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """Registered by an older version; pruned by unique_id, not by entity_id."""
+    config_entry.add_to_hass(hass)
+    _set_stop_data(hass, config_entry, {CONF_LINES: ["36"]})
+    subentry_id = next(iter(config_entry.subentries))
+    for unique_id in ("21023_next_arrival_in", "21023_line_36_next_arrival_in"):
+        entity_registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            unique_id,
+            config_entry=config_entry,
+            config_subentry_id=subentry_id,
+            suggested_object_id=f"renamed_by_user_{unique_id}",
+        )
+
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert not [
+        entry
+        for entry in er.async_entries_for_config_entry(
+            entity_registry, config_entry.entry_id
+        )
+        if entry.unique_id.endswith("_next_arrival_in")
+    ]
 
 
 async def test_setup_is_retried_when_the_stop_cannot_be_identified(
@@ -187,7 +223,11 @@ async def test_a_stop_that_cannot_be_looked_up_yet_is_an_outage(
     mock_index: AsyncMock,
     mock_curlbus: AsyncMock,
 ) -> None:
-    """Without an index nobody can tell a wrong code from a missing timetable."""
+    """Without an index nobody can tell a wrong code from a missing timetable.
+
+    A stop that is not configured: a configured one is answered from its
+    coordinator's last board, like the card.
+    """
     mock_index.available = False
     mock_index.async_stop.side_effect = IsraelTransitError("not built")
     mock_curlbus.arrivals.side_effect = IsraelTransitError("curlbus HTTP 500")
@@ -196,7 +236,7 @@ async def test_a_stop_that_cannot_be_looked_up_yet_is_an_outage(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_GET_ARRIVALS,
-            {CONF_STOP_CODE: 21023},
+            {CONF_STOP_CODE: 20092},
             blocking=True,
             return_response=True,
         )
