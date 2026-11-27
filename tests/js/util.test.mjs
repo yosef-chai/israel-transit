@@ -12,7 +12,12 @@ import {
 } from "../../src/util.js";
 
 test("מתי השירות חוזר, בשעון ישראל", () => {
-  const hass = { language: "he", locale: { language: "he", time_format: "24" } };
+  // שעון ישראל במפורש: ב-CI אזור הזמן של המכונה הוא UTC.
+  const hass = {
+    language: "he",
+    locale: { language: "he", time_format: "24", time_zone: "server" },
+    config: { time_zone: "Asia/Jerusalem" },
+  };
   // שישי, 4 בספטמבר 2026, 18:00 בישראל.
   const friday = Date.parse("2026-09-04T15:00:00Z");
   assert.equal(whenPhrase(hass, "2026-09-05T17:15:00Z", friday), "במוצ״ש ב-20:15");

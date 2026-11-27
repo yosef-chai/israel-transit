@@ -15,7 +15,6 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
 
-from custom_components.israel_transit import llm as transit_llm
 from custom_components.israel_transit.api import Arrival, RouteStop, Stop
 from custom_components.israel_transit.const import (
     DOMAIN,
@@ -378,6 +377,15 @@ async def test_a_cancelled_alert_never_fires(
 # --- Assist -----------------------------------------------------------------
 
 
+@pytest.fixture
+def transit_llm() -> Any:
+    """הפלטפורמה דורשת את homeassistant.components.llm, שקיים רק מ-2026.8."""
+    pytest.importorskip("homeassistant.components.llm")
+    from custom_components.israel_transit import llm as module  # noqa: PLC0415
+
+    return module
+
+
 def _llm_context() -> llm.LLMContext:
     return llm.LLMContext(
         platform="test",
@@ -389,7 +397,7 @@ def _llm_context() -> llm.LLMContext:
 
 
 async def test_assist_gets_a_summary_of_every_stop(
-    hass: HomeAssistant, loaded_entry: MockConfigEntry
+    hass: HomeAssistant, loaded_entry: MockConfigEntry, transit_llm: Any
 ) -> None:
     tools = transit_llm.async_get_tools(hass, _llm_context(), llm.LLM_API_ASSIST)
     assert tools is not None
@@ -410,7 +418,7 @@ async def test_assist_gets_a_summary_of_every_stop(
 
 
 async def test_assist_is_told_which_stops_exist(
-    hass: HomeAssistant, loaded_entry: MockConfigEntry
+    hass: HomeAssistant, loaded_entry: MockConfigEntry, transit_llm: Any
 ) -> None:
     tool = transit_llm.GetArrivalsTool()
 
